@@ -1,0 +1,26 @@
+/*
+ * CONFIG TYPE: declaration
+ * ⚠️ ตารางนี้มี PII (customer_email) — ตาม PDPA ต้อง hash ก่อนขึ้น silver
+ *    และห้ามให้ค่าดิบโผล่ที่ชั้น gold เด็ดขาด
+ */
+
+config {
+  type: "declaration",
+  database: dataform.projectConfig.vars.sourceProject,
+  schema: dataform.projectConfig.vars.sourceDataset,
+  name: "ecom_order_header",
+  description: "ออเดอร์ออนไลน์ — สถานะเปลี่ยนได้ ต้นทางส่งแถวเดิมกลับมาซ้ำเมื่อสถานะเปลี่ยน (มี PII)",
+  columns: {
+    order_id:       "เลขที่ออเดอร์",
+    line_no:        "ลำดับบรรทัด",
+    order_ts:       "เวลาที่สั่งซื้อ (UTC)",
+    branch_code:    "สาขาที่จัดส่ง/ตัดสต็อก",
+    sku_code:       "รหัสสินค้า",
+    qty:            "จำนวน",
+    net_amount:     "มูลค่าสุทธิ (THB, NUMERIC)",
+    order_status:   "pending / paid / shipped / delivered / cancelled",
+    customer_email: "⚠️ PII — ห้ามส่งต่อชั้นบนแบบดิบ ต้อง hash ที่ silver",
+    updated_ts:     "watermark สำหรับ incremental (UTC)",
+    run_date:       "วันที่โหลดเข้า bronze"
+  }
+}
