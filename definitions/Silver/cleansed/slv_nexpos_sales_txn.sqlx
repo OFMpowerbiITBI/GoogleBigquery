@@ -1,0 +1,60 @@
+/*
+ * CONFIG TYPE: view                 (คู่มือบทที่ 10)
+ * เทคนิคที่สาธิต: assertions ครบ 3 ชนิด · includes (docs + helpers) · dedup · แปลง timezone
+ *
+ * ทำไมเป็น view ไม่ใช่ table:
+ *   ชั้น cleansed ทำแค่ cast / เปลี่ยนชื่อ / ตัดแถวซ้ำ — logic เบา ข้อมูลไม่ใหญ่
+ *   view ให้ค่าล่าสุดเสมอ ไม่กินพื้นที่ และถ้าต้นทางเปลี่ยนคอลัมน์ เราแก้ที่เดียว
+ *   (ถ้าวันหนึ่งมันช้าหรือถูกเรียกซ้ำหลายที่ ค่อยเปลี่ยนเป็น table — เปลี่ยนแค่บรรทัดเดียว)
+ *
+ * grain: receipt_no x line_no (1 แถวต่อ 1 บรรทัดใบเสร็จ เวอร์ชันล่าสุด)
+ */
+
+config {
+  type: "view",
+  schema: "sbx_silver",
+  description: "ธุรกรรมขาย NexPOS ที่ทำความสะอาดแล้ว — ตัดแถวซ้ำ เหลือเวอร์ชัน updated_ts ล่าสุด และเพิ่ม sales_date ตามเวลาไทย",
+  tags: ["daily", "silver", "merchandise"],
+  assertions: {
+    uniqueKey: ["receipt_no", "line_no"],
+    nonNull: ["sales_date", "branch_code", "sku_code", "net_amount"],
+    rowConditions: [
+      'qty > 0',
+      'net_amount >= 0',
+      'sales_date <= CURRENT_DATE("Asia/Bangkok")'
+    ]
+  },
+  columns: {
+    receipt_no:   "เลขที่ใบเสร็จ",
+    line_no:      "ลำดับบรรทัด",
+    sales_ts:     docs.sales_ts,
+    sales_date:   docs.sales_date,
+    branch_code:  docs.branch_code,
+    sku_code:     docs.sku_code,
+    bu:           docs.bu,
+    qty:          "จำนวนที่ขาย",
+    unit_price:   "ราคาต่อหน่วย (THB)",
+    discount_amt: "ส่วนลด (THB)",
+    net_amount:   docs.net_amount_thb,
+    updated_ts:   docs.updated_ts
+  }
+}
+
+SELECT
+  receipt_no,
+  line_no,
+  sales_ts,
+  -- แปลงเป็นวันที่ธุรกิจอย่างชัดเจน: รายการ 00:30 น. เวลาไทยต้องนับเป็นวันนี้ ไม่ใช่เมื่อวาน (UTC)
+  ${helpers.bkkDate("sales_ts")} AS sales_date,
+  branch_code,
+  sku_code,
+  bu,
+  qty,
+  unit_price,
+  discount_amt,
+  ${helpers.thb("net_amount")} AS net_amount,
+  updated_ts
+FROM ${ref("nexpos_sales_txn")}
+WHERE sku_code IS NOT NULL          -- แถวที่ต้นทางส่งมาไม่มี SKU ใช้ไม่ได้ ตัดทิ้งที่นี่
+-- ต้นทางส่งใบเสร็จเดิมกลับมาได้เมื่อมีการแก้ไข → เก็บเฉพาะเวอร์ชันล่าสุดของแต่ละบรรทัด
+${helpers.latestPerKey(["receipt_no", "line_no"], "updated_ts")}

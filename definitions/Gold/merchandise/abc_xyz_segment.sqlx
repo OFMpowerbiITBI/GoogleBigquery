@@ -1,0 +1,117 @@
+/*
+ * CONFIG TYPE: table
+ * เทคนิคที่สาธิต: dependOnDependencyAssertions + includeDependentAssertions
+ *                                   (คู่มือบทที่ 15.3)
+ *
+ * dependOnDependencyAssertions: true
+ *   = ตารางนี้จะรันก็ต่อเมื่อ assertion ของ "ทุก dependency" ผ่านหมด
+ *     ป้องกันไม่ให้ segment ถูกคำนวณจากข้อมูลที่รู้อยู่แล้วว่าเสีย
+ *
+ * includeDependentAssertions: false เฉพาะ dim_sku
+ *   = ยอมให้รันต่อแม้ assertion ของ dim_sku จะตก เพราะเราใช้แค่ชื่อ/แผนกไปแสดงผล
+ *     ถ้ามันเพี้ยน segment ยังถูกต้องอยู่ — ระบุรายตัวแบบนี้มีลำดับสูงกว่าค่ารวมด้านบน
+ *
+ * ABC = สัดส่วนยอดขายสะสม (A ≤ 80%, B ≤ 95%, C ที่เหลือ)
+ * XYZ = ความผันผวนของดีมานด์ CV = stddev/mean (X < 0.5, Y < 1.0, Z ที่เหลือ)
+ * ⚠️ เกณฑ์ตัวเลขนี้เป็นค่าตั้งต้นจากตำรา ยังไม่ผ่านการยืนยันจากฝั่งธุรกิจ
+ *
+ * grain: sku_code x bu (ช่วง 90 วันล่าสุด)
+ */
+
+config {
+  type: "table",
+  schema: "sbx_gold_merchandise",
+  description: "การแบ่งกลุ่ม SKU ตามยอดขาย (ABC) และความผันผวนของดีมานด์ (XYZ) ช่วง 90 วันล่าสุด",
+  tags: ["weekly", "gold", "merchandise"],
+  dependOnDependencyAssertions: true,
+  // ⚠️ ทดสอบกับ core 3.0.43 แล้ว: ถ้าประกาศ dim_sku ใน dependencies แบบ object
+  //    พร้อมกับเรียก ${ref("dim_sku")} ในตัว query จะ compile ไม่ผ่าน
+  //    ("Conflicting includeDependentAssertions properties are not allowed")
+  //    วิธีที่ถูกคือใส่ property ลงไปใน ref() ตรง ๆ — ดูท้ายไฟล์
+  bigquery: {
+    clusterBy: ["bu", "abc_class"]
+  },
+  assertions: {
+    uniqueKey: ["bu", "sku_code"],
+    nonNull: ["bu", "sku_code", "abc_class", "xyz_class"],
+    rowConditions: [
+      'abc_class IN ("A", "B", "C")',
+      'xyz_class IN ("X", "Y", "Z")',
+      'revenue_share_pct BETWEEN 0 AND 1'
+    ]
+  },
+  columns: {
+    bu:                docs.bu,
+    sku_code:          docs.sku_code,
+    sku_name:          "ชื่อสินค้า (มาจาก dim_sku ใช้เพื่อแสดงผลเท่านั้น)",
+    dept_code:         "รหัสแผนกสินค้า",
+    total_revenue:     "ยอดขายรวม 90 วัน (THB)",
+    revenue_share_pct: "สัดส่วนยอดขายของ SKU นี้ใน BU",
+    cum_share_pct:     "สัดส่วนสะสมเมื่อเรียงจากขายดีที่สุด",
+    demand_cv:         "ค่าสัมประสิทธิ์ความผันผวนของยอดขายรายวัน",
+    abc_class:         "A = 80% แรกของยอดขาย, B = ถึง 95%, C = ที่เหลือ",
+    xyz_class:         "X = ดีมานด์นิ่ง (CV<0.5), Y = ผันผวนปานกลาง (<1.0), Z = ผันผวนสูง",
+    segment:           "ABC ต่อด้วย XYZ เช่น AX = ขายดีและคาดเดาได้"
+  }
+}
+
+WITH daily AS (
+  SELECT bu, sku_code, sales_date, SUM(qty_sold) AS qty_sold, SUM(net_amount) AS net_amount
+  FROM ${ref("slv_sku_daily_sales")}
+  WHERE sales_date >= DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL 90 DAY)
+    AND bu IS NOT NULL
+  GROUP BY 1, 2, 3
+),
+
+per_sku AS (
+  SELECT
+    bu,
+    sku_code,
+    SUM(net_amount) AS total_revenue,
+    SAFE_DIVIDE(STDDEV_SAMP(qty_sold), AVG(qty_sold)) AS demand_cv
+  FROM daily
+  GROUP BY 1, 2
+),
+
+ranked AS (
+  SELECT
+    bu,
+    sku_code,
+    total_revenue,
+    demand_cv,
+    SAFE_DIVIDE(total_revenue, SUM(total_revenue) OVER (PARTITION BY bu)) AS revenue_share_pct,
+    SAFE_DIVIDE(
+      SUM(total_revenue) OVER (PARTITION BY bu ORDER BY total_revenue DESC
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+      SUM(total_revenue) OVER (PARTITION BY bu)
+    ) AS cum_share_pct
+  FROM per_sku
+)
+
+SELECT
+  r.bu,
+  r.sku_code,
+  d.sku_name,
+  d.dept_code,
+  ${helpers.thb("r.total_revenue")} AS total_revenue,
+  r.revenue_share_pct,
+  r.cum_share_pct,
+  r.demand_cv,
+  CASE
+    WHEN r.cum_share_pct <= 0.80 THEN "A"
+    WHEN r.cum_share_pct <= 0.95 THEN "B"
+    ELSE "C"
+  END AS abc_class,
+  CASE
+    WHEN r.demand_cv IS NULL OR r.demand_cv < 0.5 THEN "X"
+    WHEN r.demand_cv < 1.0 THEN "Y"
+    ELSE "Z"
+  END AS xyz_class,
+  CONCAT(
+    CASE WHEN r.cum_share_pct <= 0.80 THEN "A" WHEN r.cum_share_pct <= 0.95 THEN "B" ELSE "C" END,
+    CASE WHEN r.demand_cv IS NULL OR r.demand_cv < 0.5 THEN "X" WHEN r.demand_cv < 1.0 THEN "Y" ELSE "Z" END
+  ) AS segment
+FROM ranked r
+-- ref() แบบ object: ยอมให้รันต่อแม้ assertion ของ dim_sku จะตก
+-- (มีลำดับความสำคัญเหนือ dependOnDependencyAssertions: true ด้านบน เฉพาะ dependency ตัวนี้)
+LEFT JOIN ${ref({ name: "dim_sku", includeDependentAssertions: false })} d USING (sku_code)

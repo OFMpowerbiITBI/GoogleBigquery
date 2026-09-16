@@ -1,0 +1,60 @@
+/*
+ * CONFIG TYPE: incremental — แบบ SNAPSHOT รายวัน + protected + onSchemaChange
+ *                                   (คู่มือบทที่ 11 แบบที่ 2)
+ *
+ * ปัญหาที่แก้: SAP เก็บเฉพาะค่าปัจจุบัน ไม่มีประวัติ — ถ้าต้นทุนมาตรฐานเปลี่ยน
+ *             เราจะไม่มีทางรู้ว่าเปลี่ยนวันไหน ตารางนี้ถ่ายภาพนิ่งไว้ทุกวัน = SCD2 อย่างง่าย
+ *
+ * protected: true  → ห้าม full refresh เด็ดขาด เพราะสร้างประวัติย้อนหลังคืนไม่ได้
+ *                    (1 ใน 5 ข้อผิดพลาดที่ทำให้ข้อมูลหายถาวรตามคู่มือ)
+ * onSchemaChange: "EXTEND" → ถ้า SAP เพิ่มคอลัมน์ใหม่ ให้เพิ่มตามโดยไม่ล้ม
+ *                    แต่ถ้ามีการลบคอลัมน์จะ error ให้คนมาดู (ไม่ใช้ SYNCHRONIZE เพราะลบข้อมูลถาวร)
+ *
+ * grain: snapshot_date x sku_code
+ */
+
+config {
+  type: "incremental",
+  schema: "sbx_silver",
+  description: "Snapshot มาสเตอร์สินค้า SAP รายวัน — ใช้ดูย้อนหลังว่าต้นทุน/สถานะเปลี่ยนวันไหน",
+  tags: ["daily", "silver", "merchandise"],
+  protected: true,
+  onSchemaChange: "EXTEND",
+  bigquery: {
+    partitionBy: "snapshot_date",
+    clusterBy: ["sku_code"]
+  },
+  assertions: {
+    uniqueKey: ["snapshot_date", "sku_code"],
+    nonNull: ["snapshot_date", "sku_code", "std_cost"],
+    rowConditions: [
+      'std_cost >= 0',
+      'status IN ("ACTIVE", "INACTIVE")'
+    ]
+  },
+  columns: {
+    snapshot_date: docs.snapshot_date,
+    sku_code:      docs.sku_code,
+    sku_name:      "ชื่อสินค้า",
+    dept_code:     "รหัสแผนกสินค้า",
+    supplier_code: "รหัสผู้ขาย",
+    std_cost:      "ต้นทุนมาตรฐาน ณ วันนั้น (THB)",
+    status:        "สถานะสินค้า ณ วันนั้น",
+    source_updated_ts: "เวลาที่ SAP แก้ไขล่าสุด (UTC)"
+  }
+}
+
+SELECT
+  CURRENT_DATE("${constants.TZ}") AS snapshot_date,
+  sku_code,
+  sku_name,
+  dept_code,
+  supplier_code,
+  ${helpers.thb("std_cost")} AS std_cost,
+  status,
+  updated_ts AS source_updated_ts
+FROM ${ref("sap_material_master")}
+
+-- รันซ้ำในวันเดียวกันจะไม่เพิ่มแถวซ้ำ เพราะเงื่อนไขนี้เป็นเท็จเมื่อมี snapshot ของวันนี้แล้ว
+${when(incremental(),
+  `WHERE CURRENT_DATE("${constants.TZ}") > (SELECT MAX(snapshot_date) FROM ${self()})`)}

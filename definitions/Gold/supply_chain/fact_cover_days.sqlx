@@ -1,0 +1,89 @@
+/*
+ * CONFIG TYPE: incremental (ชั้น gold) — MERGE + updatePartitionFilter
+ *
+ * ทำไม gold ตัวนี้ถึงเป็น incremental ไม่ใช่ table:
+ *   ตารางนี้ถ่ายภาพทุกวันและเก็บย้อนหลังยาว การสร้างใหม่ทั้งก้อนทุกเช้า
+ *   = อ่านสต็อกกับยอดขายทั้งหมดซ้ำทุกวันโดยไม่จำเป็น
+ *   uniqueKey ทำให้รันซ้ำวันเดิมได้โดยไม่เกิดแถวซ้ำ (idempotent)
+ *
+ * cover_days = สต็อกคงเหลือ / ยอดขายเฉลี่ยต่อวัน 28 วันล่าสุด
+ *   = ของที่มีอยู่จะขายได้อีกกี่วัน — ใช้จับ dead stock (สูงผิดปกติ) และ OOS เสี่ยง (ต่ำ)
+ *
+ * grain: snapshot_date x branch_code x sku_code
+ */
+
+config {
+  type: "incremental",
+  schema: "sbx_gold_supply_chain",
+  description: "จำนวนวันที่สต็อกปัจจุบันจะขายได้ (cover days) ระดับ SKU x สาขา รายวัน",
+  tags: ["daily", "gold", "supply_chain"],
+  uniqueKey: ["snapshot_date", "branch_code", "sku_code"],
+  dependOnDependencyAssertions: true,
+  bigquery: {
+    partitionBy: "snapshot_date",
+    clusterBy: ["branch_code", "sku_code"],
+    // บังคับให้ MERGE แตะแค่ 7 วันล่าสุด — ถ้าไม่ใส่จะสแกนทุก partition ทุกวัน
+    updatePartitionFilter: helpers.lateWindow("snapshot_date"),
+    labels: { owner: "smart-data", env: "sandbox", layer: "gold", domain: "supply_chain" }
+  },
+  assertions: {
+    uniqueKey: ["snapshot_date", "branch_code", "sku_code"],
+    nonNull: ["snapshot_date", "branch_code", "sku_code", "onhand_qty"],
+    rowConditions: [
+      'onhand_qty >= 0',
+      'cover_days IS NULL OR cover_days BETWEEN 0 AND 3650',
+      'stock_status IN ("OOS_RISK", "HEALTHY", "OVERSTOCK", "NO_SALES")'
+    ]
+  },
+  columns: {
+    snapshot_date:   docs.snapshot_date,
+    branch_code:     docs.branch_code,
+    sku_code:        docs.sku_code,
+    onhand_qty:      "สต็อกคงเหลือ ณ สิ้นวัน",
+    avg_daily_qty:   "ยอดขายเฉลี่ยต่อวันย้อนหลัง 28 วัน",
+    cover_days:      "onhand_qty / avg_daily_qty — NULL เมื่อไม่มียอดขายเลย",
+    stock_status:    "OOS_RISK < 7 วัน · HEALTHY 7-60 · OVERSTOCK > 60 · NO_SALES ไม่มียอดขาย"
+  }
+}
+
+WITH stock AS (
+  SELECT snapshot_date, branch_code, sku_code, onhand_qty
+  FROM ${ref("slv_stock_onhand_daily")}
+  WHERE TRUE
+    -- รอบแรกสร้างย้อนหลัง 14 วัน รอบถัดไปแตะเฉพาะหน้าต่างที่ยอมให้ข้อมูลมาช้า
+    ${when(incremental(),
+      `AND snapshot_date >= DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL ${constants.LATE_ARRIVAL_DAYS} DAY)`,
+      `AND snapshot_date >= DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL 14 DAY)`)}
+),
+
+avg_sales AS (
+  SELECT
+    s.snapshot_date,
+    s.branch_code,
+    s.sku_code,
+    -- เฉลี่ยจากหน้าต่าง 28 วันที่ย้อนจากวันของ snapshot นั้น ๆ
+    SAFE_DIVIDE(SUM(d.qty_sold), 28) AS avg_daily_qty
+  FROM stock s
+  LEFT JOIN ${ref("slv_sku_daily_sales")} d
+    ON  d.branch_code = s.branch_code
+    AND d.sku_code    = s.sku_code
+    AND d.sales_date BETWEEN DATE_SUB(s.snapshot_date, INTERVAL 27 DAY) AND s.snapshot_date
+  GROUP BY 1, 2, 3
+)
+
+SELECT
+  s.snapshot_date,
+  s.branch_code,
+  s.sku_code,
+  s.onhand_qty,
+  a.avg_daily_qty,
+  SAFE_DIVIDE(s.onhand_qty, a.avg_daily_qty) AS cover_days,
+  CASE
+    WHEN a.avg_daily_qty IS NULL OR a.avg_daily_qty = 0 THEN "NO_SALES"
+    WHEN SAFE_DIVIDE(s.onhand_qty, a.avg_daily_qty) < 7  THEN "OOS_RISK"
+    WHEN SAFE_DIVIDE(s.onhand_qty, a.avg_daily_qty) > 60 THEN "OVERSTOCK"
+    ELSE "HEALTHY"
+  END AS stock_status
+FROM stock s
+LEFT JOIN avg_sales a
+  USING (snapshot_date, branch_code, sku_code)

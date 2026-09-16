@@ -1,0 +1,105 @@
+/*
+ * CONFIG TYPE: table                (คู่มือบทที่ 10)
+ * เทคนิคที่สาธิต: บล็อก js ในไฟล์ · partition + cluster + partitionExpirationDays
+ *                 · labels สำหรับ cost allocation · หลอมหลาย source เป็นเรื่องเดียว
+ *
+ * ชั้น conformed = รวมหลาย source ให้พูดภาษาเดียวกัน
+ *   หน้าร้าน (NexPOS) + ออนไลน์ (ecom) → ยอดขายต่อ SKU ต่อสาขา ต่อวัน ชุดเดียวที่ทุกคนใช้
+ *
+ * ทำไมเป็น table ไม่ใช่ view: ถูกเรียกซ้ำจาก gold หลายตัว (STR, ABC/XYZ, cover days)
+ *   materialize ครั้งเดียวถูกกว่าคำนวณซ้ำทุกครั้ง — และเริ่มจาก table ก่อนเสมอตามมาตรฐานทีม
+ *
+ * grain: sales_date x branch_code x sku_code
+ */
+
+config {
+  type: "table",
+  schema: "sbx_silver",
+  description: "ยอดขายรวมทุกช่องทาง ระดับ SKU x สาขา x วัน (ฐานของทุก metric ในชั้น gold)",
+  tags: ["daily", "silver", "merchandise"],
+  bigquery: {
+    partitionBy: "sales_date",
+    clusterBy: ["branch_code", "sku_code"],
+    partitionExpirationDays: 1095,
+    labels: {
+      owner: "smart-data",
+      env: "sandbox",
+      layer: "silver"
+    }
+  },
+  assertions: {
+    uniqueKey: ["sales_date", "branch_code", "sku_code"],
+    nonNull: ["sales_date", "branch_code", "sku_code"],
+    rowConditions: [
+      'qty_sold >= 0',
+      'net_amount >= 0',
+      'qty_sold = qty_sold_store + qty_sold_online'
+    ]
+  },
+  columns: {
+    sales_date:      docs.sales_date,
+    branch_code:     docs.branch_code,
+    sku_code:        docs.sku_code,
+    bu:              docs.bu,
+    qty_sold:        "จำนวนที่ขายรวมทุกช่องทาง",
+    qty_sold_store:  "จำนวนที่ขายหน้าร้าน (NexPOS)",
+    qty_sold_online: "จำนวนที่ขายออนไลน์ (ไม่นับออเดอร์ที่ยกเลิก)",
+    net_amount:      docs.net_amount_thb,
+    txn_count:       "จำนวนบรรทัดรายการขาย"
+  }
+}
+
+js {
+  // JavaScript ระดับไฟล์ — ใช้ได้เฉพาะไฟล์นี้ (คู่มือบทที่ 17.2)
+  // ทำงานตอน compile เท่านั้น ไม่ได้ทำงานตอน query รัน
+  const HISTORY_DAYS = 90;                       // สร้างย้อนหลังกี่วัน
+  const EXCLUDED_STATUS = ["cancelled"];         // สถานะออเดอร์ที่ไม่นับเป็นยอดขาย
+  const statusFilter = EXCLUDED_STATUS.map(s => `"${s}"`).join(", ");
+}
+
+WITH store_sales AS (
+  SELECT
+    sales_date,
+    branch_code,
+    sku_code,
+    bu,
+    SUM(qty)        AS qty_sold_store,
+    SUM(net_amount) AS net_amount_store,
+    COUNT(*)        AS txn_count_store
+  FROM ${ref("slv_nexpos_sales_txn")}
+  WHERE sales_date >= DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL ${HISTORY_DAYS} DAY)
+  GROUP BY 1, 2, 3, 4
+),
+
+online_sales AS (
+  SELECT
+    o.order_date AS sales_date,
+    o.branch_code,
+    o.sku_code,
+    b.bu,
+    SUM(o.qty)        AS qty_sold_online,
+    SUM(o.net_amount) AS net_amount_online,
+    COUNT(*)          AS txn_count_online
+  FROM ${ref("slv_ecom_order_header")} o
+  -- ต้องรู้ว่าสาขาอยู่ BU ไหน → ใช้ dimension กลางของชั้น silver
+  LEFT JOIN ${ref("dim_branch")} b USING (branch_code)
+  WHERE o.order_date >= DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL ${HISTORY_DAYS} DAY)
+    AND o.order_status NOT IN (${statusFilter})
+  GROUP BY 1, 2, 3, 4
+)
+
+SELECT
+  COALESCE(s.sales_date,  o.sales_date)  AS sales_date,
+  COALESCE(s.branch_code, o.branch_code) AS branch_code,
+  COALESCE(s.sku_code,    o.sku_code)    AS sku_code,
+  COALESCE(s.bu,          o.bu)          AS bu,
+  COALESCE(s.qty_sold_store, 0) + COALESCE(o.qty_sold_online, 0) AS qty_sold,
+  COALESCE(s.qty_sold_store, 0)          AS qty_sold_store,
+  COALESCE(o.qty_sold_online, 0)         AS qty_sold_online,
+  ${helpers.thb("COALESCE(s.net_amount_store, 0) + COALESCE(o.net_amount_online, 0)")} AS net_amount,
+  COALESCE(s.txn_count_store, 0) + COALESCE(o.txn_count_online, 0) AS txn_count
+FROM store_sales s
+FULL OUTER JOIN online_sales o
+  ON  s.sales_date  = o.sales_date
+  AND s.branch_code = o.branch_code
+  AND s.sku_code    = o.sku_code

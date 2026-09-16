@@ -1,0 +1,31 @@
+/*
+ * CONFIG TYPE: operations + hasOutput: true    (คู่มือบทที่ 14)
+ *
+ * operations = ส่ง SQL อะไรก็ได้เข้า BigQuery ตรง ๆ ไม่มี boilerplate ห่อให้
+ * hasOutput: true = บอก Dataform ว่า action นี้มีตารางปลายทาง → คนอื่น ref()/depend ได้
+ *
+ * ใช้ CREATE TABLE IF NOT EXISTS (ไม่ใช่ CREATE OR REPLACE) เพราะเป็นตาราง log
+ * ที่ต้องสะสมข้อมูล ถ้าเผลอ replace ทุกรอบ ประวัติการรันจะหายหมด
+ *
+ * ตารางนี้ถูกเขียนโดย post_operations ของ gold/phms/phms_sku_health.sqlx
+ */
+
+config {
+  type: "operations",
+  hasOutput: true,
+  schema: "sbx_utility",
+  description: "บันทึกการรันของ action ที่สำคัญ — ใช้ไล่ย้อนตอนตัวเลขเพี้ยน",
+  tags: ["daily", "utility", "monitoring"]
+}
+
+CREATE TABLE IF NOT EXISTS ${self()} (
+  logged_at    TIMESTAMP NOT NULL OPTIONS (description = "เวลาที่บันทึก (UTC)"),
+  action_name  STRING    NOT NULL OPTIONS (description = "ชื่อ action ที่รัน"),
+  row_count    INT64              OPTIONS (description = "จำนวนแถวที่ได้หลังรัน"),
+  note         STRING             OPTIONS (description = "หมายเหตุ เช่น environment")
+)
+PARTITION BY DATE(logged_at)
+OPTIONS (
+  description = "ETL run log ของ sandbox",
+  partition_expiration_days = 90
+)

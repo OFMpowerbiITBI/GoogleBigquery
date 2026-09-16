@@ -1,0 +1,27 @@
+/*
+ * CONFIG TYPE: operations (หลายคำสั่งในไฟล์เดียว)
+ *
+ * หลายคำสั่งใน type: "operations" คั่นด้วย ; (semicolon) และถูกส่งไปรันเป็น BigQuery script เดียว
+ * (ต่างจาก pre_operations ที่ต้องคั่นด้วย --- ขีดสามอัน — จุดนี้คนพลาดบ่อย)
+ *
+ * ใช้ ref() เพื่อบังคับลำดับ: ต้องรันหลังตารางเป้าหมายถูกสร้างเสร็จแล้วเท่านั้น
+ * tags เป็น monthly เพราะไม่จำเป็นต้องล้างทุกวัน — workflow config รายเดือนจะหยิบตัวนี้ไปรัน
+ *
+ * ⚠️ ไฟล์นี้ลบข้อมูลจริง ให้ตรวจ retention กับเจ้าของข้อมูลก่อนเปลี่ยนตัวเลขใน constants.js
+ */
+
+config {
+  type: "operations",
+  schema: "sbx_utility",
+  description: "ลบข้อมูล gold ที่เกินอายุเก็บรักษา",
+  tags: ["monthly", "utility", "maintenance"]
+}
+
+DELETE FROM ${ref("phms_sku_health")}
+WHERE snapshot_date < DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL ${constants.GOLD_RETENTION_DAYS} DAY);
+
+DELETE FROM ${ref("phms_branch_score")}
+WHERE snapshot_date < DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL ${constants.GOLD_RETENTION_DAYS} DAY);
+
+DELETE FROM ${ref("fact_cover_days")}
+WHERE snapshot_date < DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL ${constants.GOLD_RETENTION_DAYS} DAY);

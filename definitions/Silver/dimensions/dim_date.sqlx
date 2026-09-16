@@ -1,0 +1,53 @@
+/*
+ * CONFIG TYPE: table (dimension ที่ไม่มี source)
+ * เทคนิคที่สาธิต: action ที่ไม่มี ref() เลย — ไม่มี dependency ใน DAG
+ *                 · ปฏิทินธุรกิจไทย (สัปดาห์เริ่มวันจันทร์, ปีงบ ม.ค.–ธ.ค.)
+ *
+ * ทำไมต้องมี: รายงานต้องมีทุกวันแม้วันที่ไม่มีรายการ — ถ้า join จาก fact อย่างเดียว
+ *             วันที่ยอดขายเป็นศูนย์จะหายไปจากกราฟ
+ *
+ * grain: date_day
+ */
+
+config {
+  type: "table",
+  schema: "sbx_silver",
+  description: "มิติวันที่ 2024-01-01 ถึงสิ้นปีหน้า ตามปฏิทินธุรกิจไทย",
+  tags: ["daily", "silver", "master_data"],
+  bigquery: {
+    clusterBy: ["date_day"]
+  },
+  assertions: {
+    uniqueKey: ["date_day"],
+    nonNull: ["date_day", "year_month", "week_start_date"]
+  },
+  columns: {
+    date_day:        "วันที่ (คีย์หลัก)",
+    year:            "ปี ค.ศ.",
+    quarter:         "ไตรมาส 1-4",
+    month:           "เดือน 1-12",
+    year_month:      "YYYYMM สำหรับรายงานรายเดือน",
+    week_start_date: "วันจันทร์ของสัปดาห์นั้น",
+    day_of_week:     "1 = จันทร์ ... 7 = อาทิตย์",
+    is_weekend:      "เสาร์-อาทิตย์หรือไม่",
+    is_month_end:    "เป็นวันสุดท้ายของเดือนหรือไม่"
+  }
+}
+
+SELECT
+  date_day,
+  EXTRACT(YEAR    FROM date_day)                       AS year,
+  EXTRACT(QUARTER FROM date_day)                       AS quarter,
+  EXTRACT(MONTH   FROM date_day)                       AS month,
+  CAST(FORMAT_DATE("%Y%m", date_day) AS INT64)         AS year_month,
+  DATE_TRUNC(date_day, WEEK(MONDAY))                   AS week_start_date,
+  MOD(EXTRACT(DAYOFWEEK FROM date_day) + 5, 7) + 1     AS day_of_week,
+  EXTRACT(DAYOFWEEK FROM date_day) IN (1, 7)           AS is_weekend,
+  date_day = LAST_DAY(date_day)                        AS is_month_end
+FROM UNNEST(
+  GENERATE_DATE_ARRAY(
+    DATE "2024-01-01",
+    DATE_TRUNC(DATE_ADD(CURRENT_DATE("${constants.TZ}"), INTERVAL 1 YEAR), YEAR),
+    INTERVAL 1 DAY
+  )
+) AS date_day

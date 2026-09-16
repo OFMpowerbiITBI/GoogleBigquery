@@ -1,0 +1,37 @@
+/*
+ * CONFIG TYPE: view
+ *
+ * มีไฟล์นี้เพราะกฎการไหลของข้อมูล: gold ห้าม ref() ข้ามชั้นไปหยิบ bronze ตรง ๆ
+ * ถ้าชั้น gold (PHMS) ต้องใช้ planogram ก็ต้องมีตัวแทนที่ชั้น silver ก่อนเสมอ
+ *
+ * grain: branch_code x sku_code x slot_id (เฉพาะ slot ที่ยังใช้งานอยู่)
+ */
+
+config {
+  type: "view",
+  schema: "sbx_silver",
+  description: "แผนผังชั้นวางที่ยังมีผลบังคับใช้ ณ วันนี้",
+  tags: ["daily", "silver", "phms"],
+  assertions: {
+    uniqueKey: ["branch_code", "sku_code", "slot_id"],
+    nonNull: ["branch_code", "sku_code", "planned_facing"],
+    rowConditions: ['planned_facing > 0']
+  },
+  columns: {
+    slot_id:        "รหัสช่องวางสินค้า",
+    branch_code:    docs.branch_code,
+    sku_code:       docs.sku_code,
+    planned_facing: "จำนวน facing ตามแผน",
+    effective_date: "วันที่แผนนี้เริ่มมีผล"
+  }
+}
+
+SELECT
+  slot_id,
+  branch_code,
+  sku_code,
+  planned_facing,
+  effective_date
+FROM ${ref("planogram_slot")}
+WHERE is_active
+  AND effective_date <= CURRENT_DATE("${constants.TZ}")

@@ -1,0 +1,33 @@
+/*
+ * CONFIG TYPE: assertion (ไฟล์แยก)   (คู่มือบทที่ 15.2)
+ *
+ * หลักการเดียวที่ต้องจำ: assertion คือ query ที่คืน "แถวที่ผิด"
+ *   คืน 0 แถว = ผ่าน · คืนแถวใดแถวหนึ่ง = ตก
+ *
+ * ตัวนี้ตรวจความสด: เมื่อวานต้องมียอดขายอย่างน้อย 1 แถวของทุก BU
+ * ถ้า pipeline ต้นทางไม่มา ตารางจะยังรันได้แต่ข้อมูลค้าง — assertion แบบนี้จับได้
+ *
+ * ตารางที่ห้ามรันต่อถ้าตัวนี้ตก ให้ประกาศ dependencies: ["assert_sales_freshness"]
+ * (ดู gold/phms/phms_branch_score.sqlx)
+ */
+
+config {
+  type: "assertion",
+  schema: "sbx_dataform_assertions",
+  description: "ต้องมียอดขายของเมื่อวานครบทุก BU ไม่งั้นถือว่าข้อมูลค้าง",
+  tags: ["daily", "silver", "data_quality"]
+}
+
+WITH expected AS (
+  SELECT DISTINCT bu FROM ${ref("dim_branch")} WHERE is_active
+),
+actual AS (
+  SELECT DISTINCT bu
+  FROM ${ref("slv_sku_daily_sales")}
+  WHERE sales_date = DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL 1 DAY)
+)
+-- คืนเฉพาะ BU ที่ "ควรมี" แต่ "ไม่มี" ข้อมูลเมื่อวาน
+SELECT e.bu
+FROM expected e
+LEFT JOIN actual a USING (bu)
+WHERE a.bu IS NULL

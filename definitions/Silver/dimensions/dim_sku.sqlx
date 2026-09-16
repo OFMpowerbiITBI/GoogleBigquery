@@ -1,0 +1,65 @@
+/*
+ * CONFIG TYPE: table (dimension)
+ * เทคนิคที่สาธิต: metadata สำหรับ Knowledge Catalog (บทที่ 16.4)
+ *                 · ตัวอย่าง bigqueryPolicyTags สำหรับคอลัมน์อ่อนไหว (บทที่ 16.3)
+ *
+ * ดึงจาก snapshot ล่าสุดของ SAP แทนที่จะดึงจาก bronze ตรง ๆ
+ * เพื่อให้ dimension กับ fact อ้างอิงชุดข้อมูลเดียวกันเสมอ
+ *
+ * grain: sku_code
+ */
+
+config {
+  type: "table",
+  schema: "sbx_silver",
+  description: "มิติสินค้า — ค่าล่าสุดจาก snapshot ของ SAP",
+  tags: ["daily", "silver", "master_data"],
+  assertions: {
+    uniqueKey: ["sku_code"],
+    nonNull: ["sku_code", "sku_name", "std_cost"],
+    rowConditions: ['std_cost >= 0']
+  },
+  // metadata ถูก sync ไป Knowledge Catalog แบบ asynchronous หลัง action สำเร็จ
+  // ⚠️ ทดสอบกับ core 3.0.43 แล้ว: ใส่ extraProperties.generic ตามตัวอย่างในคู่มือ compile ไม่ผ่าน
+  //    ("Unexpected property generic") — เวอร์ชันนี้รับเฉพาะ key ที่ proto กำหนดไว้ ใช้ overview อย่างเดียว
+  metadata: {
+    overview: "มิติสินค้ามาตรฐานสำหรับทุกโดเมน — ถ้าต้องการฟิลด์เพิ่ม ให้เพิ่มที่นี่ ไม่ใช่ไป join bronze เอง"
+  },
+  columns: {
+    sku_sk:        "surrogate key ของสินค้า (hash จาก sku_code)",
+    sku_code:      docs.sku_code,
+    sku_name:      "ชื่อสินค้า",
+    dept_code:     "รหัสแผนกสินค้า",
+    supplier_code: "รหัสผู้ขาย",
+    std_cost:      "ต้นทุนมาตรฐานล่าสุด (THB)",
+    status:        "ACTIVE / INACTIVE",
+    snapshot_date: docs.snapshot_date
+
+    /*
+     * ตัวอย่างการติด policy tag ให้คอลัมน์อ่อนไหว (ในนี้ยังไม่มีคอลัมน์แบบนั้น)
+     * ต้องสร้าง taxonomy ใน BigQuery ก่อน และ service account ที่ Dataform ใช้รัน
+     * ต้องมีสิทธิ์ column-level access ด้วย เพราะ tag ถูกติดตอน "รัน" ไม่ใช่ตอน compile
+     *
+     * supplier_contact: {
+     *   description: "ผู้ติดต่อฝั่งผู้ขาย",
+     *   bigqueryPolicyTags: [
+     *     "projects/ofm-b2s-data-dev/locations/asia-southeast1/taxonomies/<TAXONOMY_ID>/policyTags/<TAG_ID>"
+     *   ]
+     * }
+     */
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(sku_code) AS sku_sk,
+  sku_code,
+  sku_name,
+  dept_code,
+  supplier_code,
+  std_cost,
+  status,
+  snapshot_date
+FROM ${ref("slv_sap_material_master")}
+WHERE TRUE   -- BigQuery บังคับว่า QUALIFY ต้องมาคู่กับ WHERE / GROUP BY / HAVING
+-- snapshot ล่าสุดเท่านั้น
+QUALIFY ROW_NUMBER() OVER (PARTITION BY sku_code ORDER BY snapshot_date DESC) = 1

@@ -1,0 +1,38 @@
+/*
+ * CONFIG TYPE: view + disabled: true    (คู่มือบทที่ 13.4)
+ *
+ * disabled: true = ยัง compile และยังเห็นใน DAG แต่ไม่ถูกรัน
+ *   ดีกว่าการ comment โค้ดทั้งไฟล์ทิ้ง เพราะยังเห็นความสัมพันธ์ว่าตารางนี้จะดึงจากอะไร
+ *   และ compile error ยังจับได้อยู่ (โค้ดที่ comment ไว้จะเน่าเงียบ ๆ)
+ *
+ * ทำไมปิดไว้: ยังไม่มีข้อมูลต้นทุนต่อแคมเปญจากฝั่ง Marketing
+ *   ค่า campaign_cost ข้างล่างเป็นค่าสมมติเพื่อให้ compile ผ่านเท่านั้น
+ *   → เปิดใช้เมื่อได้ source จริงแล้ว โดยลบบรรทัด disabled ออกและเปลี่ยนมา ref() ตารางจริง
+ *
+ * grain: order_date x branch_code
+ */
+
+config {
+  type: "view",
+  disabled: true,
+  schema: "sbx_gold_marketing",
+  description: "ROAS ต่อแคมเปญ (ยังปิดใช้งาน — รอ source ต้นทุนแคมเปญจาก Marketing)",
+  tags: ["daily", "gold", "marketing"],
+  columns: {
+    order_date:    "วันที่สั่งซื้อตามเวลาไทย",
+    branch_code:   docs.branch_code,
+    revenue:       "ยอดขายออนไลน์ที่ไม่ถูกยกเลิก (THB)",
+    campaign_cost: "⚠️ ค่าสมมติ 5,000 บาท/วัน — รอต้นทุนจริง",
+    roas:          "revenue / campaign_cost"
+  }
+}
+
+SELECT
+  order_date,
+  branch_code,
+  ${helpers.thb("SUM(net_amount)")}            AS revenue,
+  NUMERIC "5000"                               AS campaign_cost,
+  SAFE_DIVIDE(SUM(net_amount), NUMERIC "5000") AS roas
+FROM ${ref("slv_ecom_order_header")}
+WHERE order_status <> "cancelled"
+GROUP BY 1, 2

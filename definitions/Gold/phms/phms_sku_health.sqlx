@@ -1,0 +1,131 @@
+/*
+ * CONFIG TYPE: table + post_operations   (คู่มือบทที่ 14, 16)
+ * เทคนิคที่สาธิต: post_operations (เขียน log หลังสร้างตารางเสร็จ) · additionalOptions
+ *                 · columns แบบซ้อน record · dependencies ที่ไม่ได้เกิดจาก ref()
+ *
+ * PHMS = คะแนนสุขภาพ planogram ระดับ SKU x สาขา รายวัน
+ *   หักคะแนนจาก 2 เรื่อง: facing ที่ขาดจากแผน และชั่วโมงที่ของหมดชั้น
+ *   ⚠️ สูตรคะแนนในนี้เป็นตัวอย่างสำหรับ sandbox ไม่ใช่สูตร PHMS จริงขององค์กร
+ *
+ * grain: snapshot_date x branch_code x sku_code
+ */
+
+config {
+  type: "table",
+  schema: "sbx_gold_phms",
+  description: "คะแนนสุขภาพ planogram ระดับ SKU x สาขา รายวัน พร้อมสถานะ RAG",
+  tags: ["daily", "gold", "phms"],
+  dependencies: ["etl_run_log"],          // ต้องมีตาราง log ก่อน เพราะ post_operations เขียนลงไป
+  bigquery: {
+    partitionBy: "snapshot_date",
+    clusterBy: ["branch_code", "rag_status"],
+    labels: { owner: "smart-data", env: "sandbox", layer: "gold", domain: "phms" },
+    additionalOptions: {
+      // ค่าใน additionalOptions ถูกใส่ลง OPTIONS(...) ตรง ๆ → string ต้องมี quote ซ้อน
+      friendly_name: "\"PHMS • SKU health (sandbox)\""
+    }
+
+    // ⚠️ กับดัก: requirePartitionFilter: true จะทำให้ assertion อัตโนมัติของ Dataform ล้ม
+    //    เพราะ query ตรวจ uniqueKey/nonNull ที่ Dataform สร้างให้ไม่ได้ใส่เงื่อนไข partition
+    //    ถ้าจำเป็นต้องบังคับจริง ให้ยอมแลกด้วยการเขียน manual assertion ที่ใส่ filter เอง
+    // requirePartitionFilter: true
+  },
+  assertions: {
+    uniqueKey: ["snapshot_date", "branch_code", "sku_code"],
+    nonNull: ["snapshot_date", "branch_code", "sku_code", "health_score"],
+    rowConditions: [
+      'health_score BETWEEN 0 AND 100',
+      'rag_status IN ("R", "A", "G")',
+      'detail.facing_gap >= 0'
+    ]
+  },
+  columns: {
+    snapshot_date: docs.snapshot_date,
+    branch_code:   docs.branch_code,
+    sku_code:      docs.sku_code,
+    health_score:  "คะแนน 0-100 (100 = ตรงแผนและไม่เคยหมดชั้น)",
+    rag_status:    docs.rag_status,
+    detail: {
+      description: "รายละเอียดการคำนวณ — เก็บเป็น record เพื่อไม่ให้ตารางหลักรก",
+      columns: {
+        planned_facing: "จำนวน facing ตามแผน",
+        actual_facing:  "จำนวน facing ที่ประเมินจากสต็อกคงเหลือ",
+        facing_gap:     "จำนวน facing ที่ขาดจากแผน",
+        oos_hours:      "ชั่วโมงที่สินค้าหมดชั้นในวันนั้น (ประเมินจากสต็อก = 0)",
+        onhand_qty:     "สต็อกคงเหลือ ณ สิ้นวัน"
+      }
+    }
+  }
+}
+
+WITH latest_stock AS (
+  SELECT snapshot_date, branch_code, sku_code, onhand_qty
+  FROM ${ref("slv_stock_onhand_daily")}
+  WHERE snapshot_date >= DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL 14 DAY)
+),
+
+scored AS (
+  SELECT
+    s.snapshot_date,
+    p.branch_code,
+    p.sku_code,
+    p.planned_facing,
+    -- ประเมิน facing จริงจากสต็อก: สมมติ 20 ชิ้นต่อ 1 facing (ใน sandbox เท่านั้น)
+    COALESCE(
+      LEAST(p.planned_facing, CAST(CEIL(SAFE_DIVIDE(s.onhand_qty, 20)) AS INT64)),
+      0
+    ) AS actual_facing,
+    CASE WHEN s.onhand_qty <= 0 THEN 8 ELSE 0 END AS oos_hours,
+    s.onhand_qty
+  FROM ${ref("slv_planogram_slot")} p
+  JOIN latest_stock s
+    ON  s.branch_code = p.branch_code
+    AND s.sku_code    = p.sku_code
+)
+
+SELECT
+  snapshot_date,
+  branch_code,
+  sku_code,
+  score AS health_score,
+  ${helpers.ragCase("score")} AS rag_status,
+  STRUCT(
+    planned_facing,
+    actual_facing,
+    planned_facing - actual_facing AS facing_gap,
+    oos_hours,
+    onhand_qty
+  ) AS detail
+FROM (
+  SELECT
+    *,
+    GREATEST(0, LEAST(100,
+      100
+      - (planned_facing - COALESCE(actual_facing, 0)) * 15   -- ขาด 1 facing หัก 15
+      - oos_hours * 5                                        -- หมดชั้น 1 ชม. หัก 5
+    )) AS score
+  FROM scored
+)
+
+post_operations {
+  -- บันทึกว่า action นี้รันเมื่อไหร่และได้กี่แถว เพื่อไล่ย้อนตอนตัวเลขเพี้ยน
+  --
+  -- ใช้ resolve() ไม่ใช่ ref() ตรงนี้: resolve() แปลงชื่อให้อย่างเดียว ไม่สร้าง dependency
+  -- เพราะเราประกาศ dependencies: ["etl_run_log"] ไว้ใน config แล้ว (สาธิตทั้งสองอย่างในที่เดียว)
+  INSERT INTO ${resolve("etl_run_log")} (logged_at, action_name, row_count, note)
+  SELECT
+    CURRENT_TIMESTAMP(),
+    "${name()}",
+    (SELECT COUNT(*) FROM ${self()}),
+    CONCAT("env=", "${dataform.projectConfig.vars.environment}")
+
+  /*
+   * อีกการใช้งานที่พบบ่อยของ post_operations คือให้สิทธิ์ทีมธุรกิจหลังสร้างตารางเสร็จ
+   * (ไม่เปิดใช้ใน sandbox เพราะ service account ต้องมีสิทธิ์ตั้ง IAM ก่อน)
+   *
+   * ---
+   * GRANT `roles/bigquery.dataViewer`
+   * ON TABLE ${self()}
+   * TO "group:merchandise-team@ofm.co.th"
+   */
+}

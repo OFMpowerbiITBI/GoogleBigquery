@@ -1,0 +1,32 @@
+/*
+ * CONFIG TYPE: assertion (ไฟล์แยก)
+ *
+ * ตรวจ "ความครบ" ซึ่ง built-in assertion ทำไม่ได้:
+ *   uniqueKey/nonNull/rowConditions ตรวจได้แค่แถวที่มีอยู่
+ *   แต่ปัญหาที่เจอบ่อยกว่าคือ "แถวที่ควรมีแล้วไม่มี" — ต้องเขียน assertion เองแบบนี้
+ *
+ * กติกา: ทุกสาขาที่เปิดอยู่และเปิดมาแล้วเกิน 3 วัน ต้องมีคะแนน PHMS ของวันนี้
+ *        เว้นสาขาเปิดใหม่ไว้ เพราะ planogram ยังตั้งไม่เสร็จเป็นเรื่องปกติ
+ *
+ * ทดสอบว่ามันจับได้จริง: รัน seed/02_seed_bad_rows.sql (เพิ่มสาขา 2004 ที่ไม่มี planogram)
+ */
+
+config {
+  type: "assertion",
+  schema: "sbx_dataform_assertions",
+  description: "ทุกสาขาที่เปิดอยู่เกิน 3 วัน ต้องมีคะแนน PHMS ของวันนี้",
+  tags: ["daily", "gold", "phms"]
+}
+
+SELECT
+  b.branch_code,
+  b.branch_name,
+  b.days_open,
+  "ไม่มีคะแนน PHMS ของวันนี้" AS issue
+FROM ${ref("dim_branch")} b
+LEFT JOIN ${ref("phms_branch_score")} s
+  ON  s.branch_code   = b.branch_code
+ AND s.snapshot_date = CURRENT_DATE("${constants.TZ}")
+WHERE b.is_active
+  AND b.days_open > 3
+  AND s.branch_code IS NULL

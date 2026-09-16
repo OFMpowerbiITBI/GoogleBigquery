@@ -1,0 +1,84 @@
+/*
+ * CONFIG TYPE: table + pre_operations   (คู่มือบทที่ 14)
+ * เทคนิคที่สาธิต: pre_operations หลายคำสั่งคั่นด้วย --- (ขีดสามอัน ไม่ใช่ semicolon)
+ *                 · CREATE TEMP FUNCTION · DECLARE ตัวแปร · date spine จาก dim_date
+ *
+ * ทำไมไม่ทำเป็น incremental: ยอดคงเหลือเป็นผลรวมสะสมตั้งแต่ยอดยกมา
+ *   ถ้ามีเอกสารย้อนหลังเข้ามาแก้ ยอดของ "ทุกวันหลังจากนั้น" เปลี่ยนตามทั้งหมด
+ *   ตารางขนาดนี้สร้างใหม่ทั้งก้อนถูกกว่าการไล่แก้ทีละ partition — ถ้าโตขึ้นค่อยทบทวน
+ *
+ * grain: snapshot_date x branch_code x sku_code
+ */
+
+config {
+  type: "table",
+  schema: "sbx_silver",
+  description: "ยอดสต็อกคงเหลือรายวันต่อ SKU x สาขา คำนวณสะสมจาก stock movement",
+  tags: ["daily", "silver", "supply_chain"],
+  bigquery: {
+    partitionBy: "snapshot_date",
+    clusterBy: ["branch_code", "sku_code"]
+  },
+  assertions: {
+    uniqueKey: ["snapshot_date", "branch_code", "sku_code"],
+    nonNull: ["snapshot_date", "branch_code", "sku_code", "onhand_qty"],
+    rowConditions: [
+      // ยอดคงเหลือติดลบ = มีเอกสารผิด ไม่ใช่เรื่องปกติ ต้องให้จับได้ทันที
+      'onhand_qty >= 0'
+    ]
+  },
+  columns: {
+    snapshot_date: docs.snapshot_date,
+    branch_code:   docs.branch_code,
+    sku_code:      docs.sku_code,
+    movement_qty:  "ผลรวมความเคลื่อนไหวของวันนั้น (+ เข้า / - ออก)",
+    onhand_qty:    "ยอดคงเหลือสะสม ณ สิ้นวัน"
+  }
+}
+
+pre_operations {
+  -- หลายคำสั่งใน pre_operations ต้องคั่นด้วย --- เท่านั้น
+  CREATE TEMP FUNCTION SafeQty(q INT64) RETURNS INT64 AS (IFNULL(q, 0));
+  ---
+  DECLARE stock_start_date DEFAULT DATE_SUB(CURRENT_DATE("${constants.TZ}"), INTERVAL 14 DAY);
+}
+
+WITH daily_move AS (
+  SELECT
+    event_date,
+    branch_code,
+    sku_code,
+    SUM(qty) AS net_qty
+  FROM ${ref("slv_nexpos_stock_movement")}
+  GROUP BY 1, 2, 3
+),
+
+keys AS (
+  SELECT DISTINCT branch_code, sku_code FROM daily_move
+),
+
+-- ต้องมีทุกวันแม้วันที่ไม่มีความเคลื่อนไหว ไม่งั้นยอดคงเหลือจะหายไปในวันที่เงียบ
+spine AS (
+  SELECT d.date_day, k.branch_code, k.sku_code
+  FROM keys k
+  CROSS JOIN (
+    SELECT date_day
+    FROM ${ref("dim_date")}
+    WHERE date_day BETWEEN stock_start_date AND CURRENT_DATE("${constants.TZ}")
+  ) d
+)
+
+SELECT
+  s.date_day AS snapshot_date,
+  s.branch_code,
+  s.sku_code,
+  SafeQty(m.net_qty) AS movement_qty,
+  SUM(SafeQty(m.net_qty)) OVER (
+    PARTITION BY s.branch_code, s.sku_code
+    ORDER BY s.date_day
+  ) AS onhand_qty
+FROM spine s
+LEFT JOIN daily_move m
+  ON  m.event_date  = s.date_day
+  AND m.branch_code = s.branch_code
+  AND m.sku_code    = s.sku_code

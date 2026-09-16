@@ -1,0 +1,48 @@
+/*
+ * CONFIG TYPE: table (dimension)
+ * เทคนิคที่สาธิต: uniqueKeys (ตรวจความไม่ซ้ำหลายชุดพร้อมกัน) · surrogate key
+ *
+ * dimension กลางของชั้น silver — เป็นข้อยกเว้นเดียวที่ gold ทุกโดเมนเรียกใช้ร่วมกันได้
+ *
+ * ตั้งใจ "ไม่" ตัดแถวซ้ำที่นี่: ถ้า MDM ส่งสาขาซ้ำมา เราอยากให้ assertion ล้มให้เห็น
+ * แล้วไปแก้ที่ต้นทาง ดีกว่าเงียบ ๆ เลือกแถวใดแถวหนึ่งมาใช้เอง
+ *
+ * grain: branch_code (SCD type 1 — เก็บค่าปัจจุบันอย่างเดียว)
+ */
+
+config {
+  type: "table",
+  schema: "sbx_silver",
+  description: "มิติสาขา — ค่าปัจจุบัน 1 แถวต่อ 1 สาขา",
+  tags: ["daily", "silver", "master_data"],
+  assertions: {
+    // uniqueKeys = array ของ array ตรวจได้หลายชุดในตารางเดียว
+    uniqueKeys: [["branch_code"], ["branch_sk"]],
+    nonNull: ["branch_code", "branch_name", "bu"],
+    rowConditions: [
+      'bu IN ("OFM", "B2S")',
+      'open_date <= CURRENT_DATE("Asia/Bangkok")'
+    ]
+  },
+  columns: {
+    branch_sk:   "surrogate key ของสาขา (hash จาก branch_code) — ใช้ join กับ fact",
+    branch_code: docs.branch_code,
+    branch_name: "ชื่อสาขา",
+    bu:          docs.bu,
+    region:      "ภูมิภาค BKK / UPC / STH",
+    is_active:   "สาขายังเปิดอยู่หรือไม่",
+    open_date:   "วันเปิดสาขา",
+    days_open:   "จำนวนวันที่เปิดมาแล้ว — ใช้เว้นสาขาใหม่ออกจากการตรวจ coverage"
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(branch_code)                                AS branch_sk,
+  branch_code,
+  branch_name,
+  bu,
+  region,
+  is_active,
+  open_date,
+  DATE_DIFF(CURRENT_DATE("${constants.TZ}"), open_date, DAY)   AS days_open
+FROM ${ref("branch_master")}

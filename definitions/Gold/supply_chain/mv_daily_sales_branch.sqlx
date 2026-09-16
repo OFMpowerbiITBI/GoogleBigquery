@@ -1,0 +1,33 @@
+/*
+ * CONFIG TYPE: view + materialized: true   → BigQuery Materialized View
+ *                                   (คู่มือบทที่ 10)
+ *
+ * ใช้เมื่อ: aggregate ง่าย ๆ จาก "ตารางเดียว" ที่อยากให้ BigQuery รีเฟรชให้เอง
+ *   BigQuery จะอัปเดต MV ให้อัตโนมัติเมื่อ base table เปลี่ยน และ query ที่หน้าตาคล้ายกัน
+ *   จะถูก re-route มาใช้ MV ให้เองโดยที่ผู้ใช้ไม่ต้องรู้
+ *
+ * ข้อจำกัดของ BigQuery ที่ต้องรู้ก่อนใช้ (ไม่ใช่ข้อจำกัดของ Dataform):
+ *   - อ้างได้ทีละ 1 ตารางเท่านั้น ห้าม JOIN และ base ต้องเป็น table ไม่ใช่ view
+ *   - รองรับเฉพาะ aggregate บางตัว (SUM/COUNT/MIN/MAX/AVG...) ห้ามใช้ฟังก์ชันไม่ deterministic
+ *   - ไม่รองรับ partitionBy/clusterBy ผ่าน Dataform เหมือน table ปกติ
+ *   - ห้ามใส่ assertions (Dataform จะสร้าง query ตรวจซึ่ง MV ไม่รองรับบางรูปแบบ)
+ *
+ * ถ้าเงื่อนไขไม่เข้าเกณฑ์ข้างบน → ใช้ type: "table" ธรรมดาแทน อย่าฝืน
+ */
+
+config {
+  type: "view",
+  materialized: true,
+  schema: "sbx_gold_supply_chain",
+  description: "ยอดขายรายวันต่อสาขา (materialized view) — ใช้เป็นตัวอย่างการทำ pre-aggregate ที่ BigQuery รีเฟรชให้เอง",
+  tags: ["daily", "gold", "supply_chain"]
+}
+
+SELECT
+  sales_date,
+  branch_code,
+  SUM(qty_sold)   AS qty_sold,
+  SUM(net_amount) AS net_amount,
+  COUNT(*)        AS sku_rows
+FROM ${ref("slv_sku_daily_sales")}
+GROUP BY 1, 2

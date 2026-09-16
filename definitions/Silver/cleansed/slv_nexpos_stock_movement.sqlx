@@ -1,0 +1,64 @@
+/*
+ * CONFIG TYPE: incremental — แบบ APPEND + pre_operations checkpoint
+ *                                   (คู่มือบทที่ 11 แบบที่ 1 และแบบที่ 5)
+ *
+ * ใช้เมื่อ: ข้อมูลเข้าอย่างเดียว ไม่แก้ย้อนหลัง (stock movement เป็น event log)
+ *
+ * ไม่มี uniqueKey → Dataform สร้างคำสั่ง INSERT (ไม่ใช่ MERGE)
+ *
+ * ทำไมต้อง DECLARE checkpoint ใน pre_operations แทนการเขียน
+ *   WHERE event_ts > (SELECT MAX(event_ts) FROM self) ตรง ๆ:
+ *   subquery ทำให้ BigQuery ไม่รู้ค่าก่อนรัน → prune partition ของ "ต้นทาง" ไม่ได้ → สแกนทั้งตาราง
+ *   พอประกาศเป็นตัวแปรก่อน ค่ากลายเป็นค่าคงที่ BigQuery จึงตัด partition ได้จริง
+ *
+ * grain: doc_no (1 แถวต่อ 1 เอกสารเคลื่อนไหว)
+ */
+
+config {
+  type: "incremental",
+  schema: "sbx_silver",
+  description: "ความเคลื่อนไหวสต็อกที่ทำความสะอาดแล้ว — append เท่านั้น",
+  tags: ["daily", "silver", "supply_chain"],
+  bigquery: {
+    // incremental ทุกตัวต้องมี partitionBy เสมอ (มาตรฐานทีม ข้อ 5)
+    partitionBy: "event_date",
+    clusterBy: ["branch_code", "sku_code"]
+  },
+  assertions: {
+    uniqueKey: ["doc_no"],
+    nonNull: ["event_date", "branch_code", "sku_code", "movement_type"],
+    rowConditions: [
+      'movement_type IN ("OPENING", "RECEIVE", "SALE", "TRANSFER", "ADJUST")'
+    ]
+  },
+  columns: {
+    doc_no:        "เลขที่เอกสาร",
+    event_ts:      "เวลาที่เกิดรายการ (UTC)",
+    event_date:    "วันที่ตามเวลาไทย — partition key",
+    branch_code:   docs.branch_code,
+    sku_code:      docs.sku_code,
+    movement_type: "ประเภทความเคลื่อนไหว",
+    qty:           "จำนวน (+ เข้า / - ออก)"
+  }
+}
+
+pre_operations {
+  -- รอบแรก (หรือหลัง full refresh) ยังไม่มีตาราง → เริ่มจากวันเริ่มข้อมูล
+  -- รอบถัดไป → เริ่มจากเวลาล่าสุดที่มีอยู่แล้ว
+  DECLARE event_ts_checkpoint DEFAULT (
+    ${when(incremental(),
+      `SELECT MAX(event_ts) FROM ${self()}`,
+      `SELECT TIMESTAMP("${constants.DATA_START}")`)}
+  );
+}
+
+SELECT
+  doc_no,
+  event_ts,
+  ${helpers.bkkDate("event_ts")} AS event_date,
+  branch_code,
+  sku_code,
+  movement_type,
+  qty
+FROM ${ref("nexpos_stock_movement")}
+WHERE event_ts > event_ts_checkpoint

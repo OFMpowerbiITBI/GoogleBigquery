@@ -1,0 +1,83 @@
+/*
+ * CONFIG TYPE: table (gold metric)
+ * ไฟล์นี้คือ "ตัวอย่างเต็มรูปแบบ" ของตาราง gold ที่ผ่าน Definition of Done ของทีม:
+ *   description + columns ครบ · assertion ครบ 3 ชนิด · tag ครบ 3 มิติ · partition + cluster
+ *
+ * นิยาม STR ที่ใช้ที่นี่: ยอดขายในสัปดาห์ / (ยอดขาย + สต็อกต้นสัปดาห์)
+ *   ⚠️ นิยาม metric ยังไม่ได้ยืนยันกับฝั่งธุรกิจ — ใน sandbox ใช้สูตรจากคู่มือไปก่อน
+ *      ก่อนเอาขึ้น prod ต้องให้ merchandise เซ็นรับนิยามนี้
+ *
+ * grain: week_start_date x branch_code x sku_code
+ */
+
+config {
+  type: "table",
+  schema: "sbx_gold_merchandise",
+  description: "อัตราการขายผ่าน (Sell-Through Rate) ระดับ SKU x สาขา x สัปดาห์",
+  tags: ["weekly", "gold", "merchandise"],
+  bigquery: {
+    partitionBy: "week_start_date",
+    clusterBy: ["branch_code", "sku_code"],
+    labels: { owner: "smart-data", env: "sandbox", layer: "gold", domain: "merchandise" }
+  },
+  assertions: {
+    uniqueKey: ["week_start_date", "branch_code", "sku_code"],
+    nonNull: ["week_start_date", "branch_code", "sku_code"],
+    rowConditions: [
+      // กฎธุรกิจ: STR ต้องอยู่ระหว่าง 0-1 เสมอ ถ้าหลุดแปลว่าสต็อกต้นงวดผิด
+      'str_pct IS NULL OR str_pct BETWEEN 0 AND 1',
+      'qty_sold >= 0',
+      'qty_begin >= 0'
+    ]
+  },
+  columns: {
+    week_start_date: "วันจันทร์ของสัปดาห์ (Asia/Bangkok)",
+    branch_code:     docs.branch_code,
+    sku_code:        docs.sku_code,
+    bu:              docs.bu,
+    qty_begin:       "สต็อกคงเหลือ ณ วันแรกของสัปดาห์",
+    qty_sold:        "จำนวนที่ขายได้ในสัปดาห์นั้น",
+    net_amount:      docs.net_amount_thb,
+    str_pct:         "qty_sold / (qty_sold + qty_begin) — NULL เมื่อไม่มีทั้งขายและสต็อก"
+  }
+}
+
+WITH weekly_sales AS (
+  SELECT
+    DATE_TRUNC(sales_date, WEEK(MONDAY)) AS week_start_date,
+    branch_code,
+    sku_code,
+    ANY_VALUE(bu)   AS bu,
+    SUM(qty_sold)   AS qty_sold,
+    SUM(net_amount) AS net_amount
+  FROM ${ref("slv_sku_daily_sales")}
+  GROUP BY 1, 2, 3
+),
+
+-- สต็อกต้นสัปดาห์ = ยอดคงเหลือของวันแรกที่มีข้อมูลในสัปดาห์นั้น
+weekly_begin_stock AS (
+  SELECT
+    DATE_TRUNC(snapshot_date, WEEK(MONDAY)) AS week_start_date,
+    branch_code,
+    sku_code,
+    onhand_qty AS qty_begin
+  FROM ${ref("slv_stock_onhand_daily")}
+  WHERE TRUE
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY DATE_TRUNC(snapshot_date, WEEK(MONDAY)), branch_code, sku_code
+    ORDER BY snapshot_date
+  ) = 1
+)
+
+SELECT
+  s.week_start_date,
+  s.branch_code,
+  s.sku_code,
+  s.bu,
+  COALESCE(b.qty_begin, 0) AS qty_begin,
+  s.qty_sold,
+  s.net_amount,
+  SAFE_DIVIDE(s.qty_sold, s.qty_sold + COALESCE(b.qty_begin, 0)) AS str_pct
+FROM weekly_sales s
+LEFT JOIN weekly_begin_stock b
+  USING (week_start_date, branch_code, sku_code)

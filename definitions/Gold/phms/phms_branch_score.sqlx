@@ -1,0 +1,66 @@
+/*
+ * CONFIG TYPE: table
+ * เทคนิคที่สาธิต: dependencies บน assertion → ทำให้ assertion "บล็อก" การรันต่อได้
+ *                                   (คู่มือบทที่ 15.3 วิธีที่ 1)
+ *
+ * ปกติ assertion เป็นใบไม้ปลายกิ่งของ DAG — ล้มแล้วตารางถัดไปยังรันต่อ
+ * ตารางนี้ประกาศ dependencies: ["assert_sales_freshness"] เพื่อบอกว่า
+ * "ถ้ายอดขายเมื่อวานยังไม่มา อย่าเพิ่งคำนวณคะแนนสาขา" — คะแนนจากข้อมูลค้างอันตรายกว่าไม่มีคะแนน
+ *
+ * grain: snapshot_date x branch_code
+ */
+
+config {
+  type: "table",
+  schema: "sbx_gold_phms",
+  description: "คะแนน PHMS ระดับสาขา รายวัน (ถัวเฉลี่ยจากคะแนนราย SKU)",
+  tags: ["daily", "gold", "phms"],
+  dependencies: ["assert_sales_freshness"],
+  bigquery: {
+    partitionBy: "snapshot_date",
+    clusterBy: ["branch_code"],
+    labels: { owner: "smart-data", env: "sandbox", layer: "gold", domain: "phms" }
+  },
+  assertions: {
+    uniqueKey: ["snapshot_date", "branch_code"],
+    nonNull: ["snapshot_date", "branch_code", "branch_score"],
+    rowConditions: [
+      'branch_score BETWEEN 0 AND 100',
+      'rag_status IN ("R", "A", "G")',
+      'sku_count > 0'
+    ]
+  },
+  columns: {
+    snapshot_date:  docs.snapshot_date,
+    branch_code:    docs.branch_code,
+    branch_name:    "ชื่อสาขา",
+    bu:             docs.bu,
+    branch_score:   "คะแนนเฉลี่ยของทุก SKU ในสาขานั้น",
+    rag_status:     docs.rag_status,
+    sku_count:      "จำนวน SKU ที่นำมาคิดคะแนน",
+    red_sku_count:  "จำนวน SKU ที่อยู่สถานะ R"
+  }
+}
+
+WITH agg AS (
+  SELECT
+    snapshot_date,
+    branch_code,
+    CAST(ROUND(AVG(health_score)) AS INT64)              AS branch_score,
+    COUNT(*)                                             AS sku_count,
+    COUNTIF(rag_status = "R")                            AS red_sku_count
+  FROM ${ref("phms_sku_health")}
+  GROUP BY 1, 2
+)
+
+SELECT
+  a.snapshot_date,
+  a.branch_code,
+  b.branch_name,
+  b.bu,
+  a.branch_score,
+  ${helpers.ragCase("a.branch_score")} AS rag_status,
+  a.sku_count,
+  a.red_sku_count
+FROM agg a
+LEFT JOIN ${ref("dim_branch")} b USING (branch_code)

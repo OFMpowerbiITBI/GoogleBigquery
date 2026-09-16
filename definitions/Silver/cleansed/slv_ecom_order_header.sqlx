@@ -1,0 +1,78 @@
+/*
+ * CONFIG TYPE: incremental — แบบ MERGE/UPSERT + updatePartitionFilter
+ *                                   (คู่มือบทที่ 11 แบบที่ 3 และ 4)
+ *
+ * ใช้เมื่อ: แถวเดิมเปลี่ยนค่าได้ (pending → paid → shipped) ต้องทับของเดิม ไม่ใช่เพิ่มแถวใหม่
+ * มี uniqueKey → Dataform สร้างคำสั่ง MERGE ให้อัตโนมัติ
+ *
+ * ⚠️ updatePartitionFilter คือบรรทัดที่ประหยัดเงินที่สุดในไฟล์นี้
+ *    ถ้าไม่ใส่ MERGE จะสแกน "ทุก partition" ของตารางปลายทางทุกวัน
+ *    ใส่แล้วแตะแค่ 7 วันล่าสุด = เผื่อข้อมูลมาช้าตามที่ทีมตกลง
+ *
+ *    ผลข้างเคียงที่ต้องรู้ให้ชัด: เงื่อนไขนี้ถูกใส่ลงใน ON ของ MERGE
+ *    ถ้าออเดอร์เก่ากว่า 7 วันเพิ่งเปลี่ยนสถานะ แถวปลายทางจะอยู่นอกหน้าต่าง → MERGE หาไม่เจอ
+ *    → กลายเป็น INSERT แถวใหม่ = คีย์ซ้ำ (ไม่ใช่ "ไม่อัปเดตเฉย ๆ")
+ *    ตัวที่จับให้คือ assertions.uniqueKey ด้านล่าง — ถ้าเจอบ่อยแปลว่าต้องขยาย
+ *    constants.LATE_ARRIVAL_DAYS ให้ครอบคลุมพฤติกรรมจริงของ source
+ *
+ * ⚠️ QUALIFY ด้านล่างจำเป็นเสมอสำหรับ MERGE: ถ้า source มี key ซ้ำในรอบเดียวกัน
+ *    BigQuery จะ error "MERGE must match at most one source row"
+ *
+ * PDPA: อีเมลลูกค้าถูก hash ที่นี่ และไม่ส่งค่าดิบต่อขึ้นไปอีกเลย
+ * grain: order_id x line_no
+ */
+
+config {
+  type: "incremental",
+  schema: "sbx_silver",
+  description: "ออเดอร์ออนไลน์ เวอร์ชันล่าสุดต่อบรรทัด — อีเมลลูกค้าถูก hash แล้วตาม PDPA",
+  tags: ["daily", "silver", "ecommerce"],
+  uniqueKey: ["order_id", "line_no"],
+  onSchemaChange: "EXTEND",
+  bigquery: {
+    partitionBy: "order_date",
+    clusterBy: ["branch_code", "order_status"],
+    updatePartitionFilter: helpers.lateWindow("order_date")
+  },
+  assertions: {
+    uniqueKey: ["order_id", "line_no"],
+    nonNull: ["order_id", "order_date", "branch_code", "sku_code"],
+    rowConditions: [
+      'qty > 0',
+      'net_amount >= 0',
+      'order_status IN ("pending","paid","shipped","delivered","cancelled")'
+    ]
+  },
+  columns: {
+    order_id:      "เลขที่ออเดอร์",
+    line_no:       "ลำดับบรรทัด",
+    order_ts:      "เวลาที่สั่งซื้อ (UTC)",
+    order_date:    "วันที่สั่งซื้อตามเวลาไทย — partition key",
+    branch_code:   docs.branch_code,
+    sku_code:      docs.sku_code,
+    qty:           "จำนวน",
+    net_amount:    docs.net_amount_thb,
+    order_status:  "สถานะล่าสุดของบรรทัดนี้",
+    customer_hash: docs.customer_hash,
+    source_updated_ts: docs.updated_ts
+  }
+}
+
+SELECT
+  order_id,
+  line_no,
+  order_ts,
+  ${helpers.bkkDate("order_ts")} AS order_date,
+  branch_code,
+  sku_code,
+  qty,
+  ${helpers.thb("net_amount")} AS net_amount,
+  order_status,
+  ${helpers.hashPii("customer_email")} AS customer_hash,   -- PDPA: ไม่เก็บอีเมลดิบ
+  updated_ts AS source_updated_ts
+FROM ${ref("ecom_order_header")}
+WHERE TRUE
+  ${when(incremental(),
+    `AND updated_ts > (SELECT MAX(source_updated_ts) FROM ${self()})`)}
+-- ต้นทางส่งหลายเวอร์ชันของบรรทัดเดียวกันมาในรอบเดียวได้ → ต้องเหลือเวอร์ชันเดียวก่อน MERGE
+${helpers.latestPerKey(["order_id", "line_no"], "updated_ts")}
