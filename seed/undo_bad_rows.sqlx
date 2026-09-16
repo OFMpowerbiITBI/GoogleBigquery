@@ -1,0 +1,18 @@
+-- ---------------------------------------------------------------------------
+-- 02b_undo_bad_rows.sql — ลบข้อมูลเสียที่ใส่ไว้ใน 02 เพื่อกลับไปสถานะเขียว
+-- รันแล้วสั่ง Dataform รันใหม่ (silver ที่เป็น incremental ต้อง full refresh
+-- เพราะแถวเสียถูก MERGE เข้าไปแล้ว — ดู docs/test-cases.md ข้อ TC-N6)
+-- ---------------------------------------------------------------------------
+
+DELETE FROM `ofm-b2s-data-dev.sbx_bronze.nexpos_sales_txn`
+WHERE receipt_no LIKE "BAD-%";
+
+DELETE FROM `ofm-b2s-data-dev.sbx_bronze.ecom_order_header`
+WHERE order_id LIKE "EOBAD-%";
+
+DELETE FROM `ofm-b2s-data-dev.sbx_bronze.nexpos_stock_movement`
+WHERE doc_no LIKE "BAD-%";
+
+DELETE FROM `ofm-b2s-data-dev.sbx_bronze.branch_master`
+WHERE branch_code = "2004"
+   OR (branch_code = "1001" AND branch_name LIKE "%แถวซ้ำ%");

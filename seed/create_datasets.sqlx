@@ -35,6 +35,3 @@ CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_utility`
 -- ที่เก็บ view ผลการทดสอบของ assertion (ตรงกับ defaultAssertionDataset)
 CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_dataform_assertions`
   OPTIONS (location = "asia-southeast1", description = "Sandbox assertion results");
-
-
-  select 1

@@ -1,0 +1,60 @@
+-- ---------------------------------------------------------------------------
+-- 02_seed_bad_rows.sql — ใส่ข้อมูล "เสีย" เพื่อทดสอบว่า assertion จับได้จริง
+--
+-- วิธีใช้: รัน 01 → รัน Dataform ให้ผ่านเขียว → รันไฟล์นี้ → รัน Dataform อีกครั้ง
+--          ต้องเห็น assertion ล้ม 5 ตัวตามตาราง docs/test-cases.md (TC-N1..TC-N5)
+--          เสร็จแล้วล้างด้วย seed/02b_undo_bad_rows.sql เพื่อกลับไปเขียว
+--
+-- ทุกแถวที่เพิ่มในไฟล์นี้มีเครื่องหมาย BAD อยู่ใน key เพื่อให้ลบออกได้ครบ
+-- ---------------------------------------------------------------------------
+
+-- TC-N1 | qty ติดลบ → ล้ม rowConditions 'qty > 0' ของ slv_nexpos_sales_txn
+INSERT INTO `ofm-b2s-data-dev.sbx_bronze.nexpos_sales_txn`
+(receipt_no, line_no, sales_ts, branch_code, sku_code, bu, qty, unit_price, discount_amt, net_amount, updated_ts, run_date)
+VALUES (
+  CONCAT("BAD-QTY-", FORMAT_DATE("%Y%m%d", CURRENT_DATE("Asia/Bangkok"))), 1,
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(10, 0, 0)), "Asia/Bangkok"),
+  "1001", "8850001000002", "OFM",
+  -3, NUMERIC "8.78", NUMERIC "0", NUMERIC "-26.34",
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(10, 1, 0)), "Asia/Bangkok"),
+  CURRENT_DATE("Asia/Bangkok")
+);
+
+-- TC-N2 | branch_code เป็น NULL → ล้ม nonNull ของ slv_ecom_order_header
+INSERT INTO `ofm-b2s-data-dev.sbx_bronze.ecom_order_header`
+(order_id, line_no, order_ts, branch_code, sku_code, qty, net_amount, order_status, customer_email, updated_ts, run_date)
+VALUES (
+  CONCAT("EOBAD-NULLBR-", FORMAT_DATE("%y%m%d", CURRENT_DATE("Asia/Bangkok"))), 1,
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(11, 0, 0)), "Asia/Bangkok"),
+  NULL, "8850001000003", 1, NUMERIC "56.70", "paid", "custbad@example.com",
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(11, 5, 0)), "Asia/Bangkok"),
+  CURRENT_DATE("Asia/Bangkok")
+);
+
+-- TC-N3 | สาขา 1001 ถูกส่งมาซ้ำ 2 แถว → ล้ม uniqueKey ของ dim_branch
+INSERT INTO `ofm-b2s-data-dev.sbx_bronze.branch_master`
+(branch_code, branch_name, bu, region, is_active, open_date, run_date)
+VALUES (
+  "1001", "OFM พระราม 9 (แถวซ้ำจาก MDM)", "OFM", "BKK", TRUE, DATE "2015-03-01",
+  CURRENT_DATE("Asia/Bangkok")
+);
+
+-- TC-N4 | สาขาเปิดมา 10 วันแล้วแต่ไม่มี planogram → ล้ม assert_phms_coverage
+INSERT INTO `ofm-b2s-data-dev.sbx_bronze.branch_master`
+(branch_code, branch_name, bu, region, is_active, open_date, run_date)
+VALUES (
+  "2004", "B2S หาดใหญ่ (ไม่มี planogram)", "B2S", "STH", TRUE,
+  DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 10 DAY),
+  CURRENT_DATE("Asia/Bangkok")
+);
+
+-- TC-N5 | ปรับสต็อกติดลบมหาศาล → onhand ติดลบ
+--         ล้ม rowConditions 'onhand_qty >= 0' ของ slv_stock_onhand_daily
+INSERT INTO `ofm-b2s-data-dev.sbx_bronze.nexpos_stock_movement`
+(doc_no, event_ts, branch_code, sku_code, movement_type, qty, run_date)
+VALUES (
+  CONCAT("BAD-ADJ-", FORMAT_DATE("%Y%m%d", CURRENT_DATE("Asia/Bangkok"))),
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(12, 0, 0)), "Asia/Bangkok"),
+  "1002", "8850001000006", "ADJUST", -99999,
+  CURRENT_DATE("Asia/Bangkok")
+);
