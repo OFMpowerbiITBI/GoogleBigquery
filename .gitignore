@@ -1,0 +1,5 @@
+# ห้าม commit credential เด็ดขาด (คู่มือบทที่ 26)
+.df-credentials.json
+node_modules/
+.dataform/
+graph.json

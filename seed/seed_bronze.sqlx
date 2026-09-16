@@ -1,0 +1,330 @@
+-- ---------------------------------------------------------------------------
+-- 01_seed_bronze.sql — dummy data ของชั้น bronze ทั้งหมด
+--
+-- เจตนา: ให้ทุกไฟล์ใน definitions/ รันได้จริงโดยไม่ต้องแตะข้อมูลของจริง
+-- ทุกวันที่ผูกกับ CURRENT_DATE("Asia/Bangkok") → รันวันไหนก็ได้ข้อมูล "7-14 วันล่าสุด" เสมอ
+--
+-- ของที่จงใจใส่ไว้เพื่อให้มีอะไรให้ทดสอบ (ดู docs/test-cases.md):
+--   1) sales_ts เป็น TIMESTAMP UTC และมีรายการ 00:30 เวลาไทย → พิสูจน์ว่า DATE(ts) ผิดวัน
+--   2) มีแถวซ้ำ receipt_no+line_no ที่ updated_ts ต่างกัน → ต้องถูกตัดทิ้งที่ silver
+--   3) ecom order มีสถานะเปลี่ยน (pending → paid) → ทดสอบ MERGE/upsert
+--   4) มี customer_email เป็น PII → ต้อง hash ก่อนขึ้น silver ตาม PDPA
+--   5) มีสาขาเปิดใหม่ที่ยังไม่มี planogram → ให้ assertion ชั้น gold จับได้
+--
+-- รัน: bq query --use_legacy_sql=false < seed/01_seed_bronze.sql
+-- ---------------------------------------------------------------------------
+
+
+-- ===========================================================================
+-- 1) branch_master — มาสเตอร์สาขา (grain: 1 แถวต่อ 1 สาขา)
+-- ===========================================================================
+CREATE OR REPLACE TABLE `ofm-b2s-data-dev.sbx_bronze.branch_master`
+OPTIONS (description = "Dummy: มาสเตอร์สาขาจากระบบ MDM")
+AS
+SELECT
+  *,
+  CURRENT_DATE("Asia/Bangkok") AS run_date
+FROM UNNEST([
+  STRUCT(
+    "1001" AS branch_code, "OFM พระราม 9"      AS branch_name, "OFM" AS bu,
+    "BKK"  AS region,      TRUE  AS is_active,  DATE "2015-03-01" AS open_date),
+  STRUCT("1002", "OFM บางนา",        "OFM", "BKK", TRUE,  DATE "2017-06-15"),
+  STRUCT("1003", "OFM เชียงใหม่",     "OFM", "UPC", FALSE, DATE "2012-01-10"),  -- ปิดแล้ว
+  STRUCT("2001", "B2S เซ็นทรัลเวิลด์", "B2S", "BKK", TRUE,  DATE "2010-11-05"),
+  STRUCT("2002", "B2S รังสิต",        "B2S", "BKK", TRUE,  DATE "2019-09-20"),
+  STRUCT("2003", "B2S ภูเก็ต",        "B2S", "STH", TRUE,  CURRENT_DATE("Asia/Bangkok"))  -- เปิดวันนี้ ยังไม่มี planogram
+]);
+
+
+-- ===========================================================================
+-- 2) sap_material_master — มาสเตอร์สินค้า (grain: 1 แถวต่อ 1 SKU)
+--    ต้นทุนมาตรฐานเปลี่ยนได้ → ใช้ทดสอบ snapshot รายวัน (SCD2 อย่างง่าย)
+-- ===========================================================================
+CREATE OR REPLACE TABLE `ofm-b2s-data-dev.sbx_bronze.sap_material_master`
+OPTIONS (description = "Dummy: มาสเตอร์สินค้าจาก SAP")
+AS
+SELECT
+  *,
+  TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR) AS updated_ts,
+  CURRENT_DATE("Asia/Bangkok") AS run_date
+FROM UNNEST([
+  STRUCT(
+    "8850001000001" AS sku_code, "กระดาษ A4 80 แกรม"  AS sku_name, "PAPER" AS dept_code,
+    "V001" AS supplier_code, NUMERIC "95.00" AS std_cost, "ACTIVE" AS status),
+  STRUCT("8850001000002", "ปากกาลูกลื่น 0.5 น้ำเงิน", "PEN",   "V002", NUMERIC "6.50",   "ACTIVE"),
+  STRUCT("8850001000003", "แฟ้มสันกว้าง 3 นิ้ว",      "FILE",  "V001", NUMERIC "42.00",  "ACTIVE"),
+  STRUCT("8850001000004", "หมึกพิมพ์ HP 680 ดำ",      "INK",   "V003", NUMERIC "420.00", "ACTIVE"),
+  STRUCT("8850001000005", "สมุดโน้ต A5 ปกแข็ง",       "BOOK",  "V004", NUMERIC "58.00",  "ACTIVE"),
+  STRUCT("8850001000006", "ดินสอ 2B แพ็ค 12",         "PEN",   "V002", NUMERIC "34.00",  "ACTIVE"),
+  STRUCT("8850001000007", "เทปใส 1 นิ้ว",             "TAPE",  "V005", NUMERIC "18.00",  "ACTIVE"),
+  STRUCT("8850001000008", "เครื่องเย็บกระดาษ No.10",   "TOOL",  "V005", NUMERIC "75.00",  "INACTIVE")
+]);
+
+
+-- ===========================================================================
+-- 3) nexpos_sales_txn — ธุรกรรมขายหน้าร้าน
+--    grain: receipt_no x line_no
+--    sales_ts เป็น UTC ตามที่ POS ส่งมาจริง ห้ามสมมติว่าเป็นเวลาไทย
+-- ===========================================================================
+CREATE OR REPLACE TABLE `ofm-b2s-data-dev.sbx_bronze.nexpos_sales_txn`
+PARTITION BY run_date
+OPTIONS (description = "Dummy: ธุรกรรมขายจาก NexPOS ระดับใบเสร็จ x บรรทัด")
+AS
+WITH cal AS (
+  SELECT day_offset FROM UNNEST(GENERATE_ARRAY(0, 6)) AS day_offset
+),
+br AS (
+  SELECT branch_code, bu FROM `ofm-b2s-data-dev.sbx_bronze.branch_master`
+  WHERE is_active AND branch_code <> "2003"          -- สาขาเปิดวันนี้ยังไม่มียอดขาย
+),
+sku AS (
+  SELECT sku_code, std_cost FROM `ofm-b2s-data-dev.sbx_bronze.sap_material_master`
+  WHERE status = "ACTIVE"
+),
+base AS (
+  SELECT
+    DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL day_offset DAY) AS sales_date_th,
+    br.branch_code,
+    br.bu,
+    sku.sku_code,
+    sku.std_cost,
+    ABS(MOD(FARM_FINGERPRINT(CONCAT(CAST(day_offset AS STRING), br.branch_code, sku.sku_code)), 97)) AS r
+  FROM cal CROSS JOIN br CROSS JOIN sku
+),
+lines AS (
+  SELECT
+    CONCAT("R", FORMAT_DATE("%Y%m%d", sales_date_th), "-", branch_code, "-",
+           LPAD(CAST(1 + MOD(r, 4) AS STRING), 3, "0")) AS receipt_no,
+    sales_date_th,
+    branch_code,
+    bu,
+    sku_code,
+    1 + MOD(r, 5)                                        AS qty,
+    CAST(ROUND(std_cost * NUMERIC "1.35", 2) AS NUMERIC)  AS unit_price,
+    r
+  FROM base
+  WHERE MOD(r, 3) <> 0                                   -- เว้นบางคู่ให้ข้อมูลดูเป็นธรรมชาติ
+)
+SELECT
+  receipt_no,
+  ROW_NUMBER() OVER (PARTITION BY receipt_no ORDER BY sku_code) AS line_no,
+  -- สร้าง TIMESTAMP จากเวลาไทยแล้วให้ BigQuery แปลงเป็น UTC ให้ (วิธีที่ถูก)
+  TIMESTAMP(DATETIME(sales_date_th, TIME(9 + MOD(r, 11), MOD(r * 7, 60), 0)), "Asia/Bangkok") AS sales_ts,
+  branch_code,
+  sku_code,
+  bu,
+  qty,
+  unit_price,
+  CASE WHEN MOD(r, 13) = 0
+       THEN CAST(ROUND(unit_price * qty * NUMERIC "0.10", 2) AS NUMERIC)
+       ELSE NUMERIC "0" END AS discount_amt,
+  CAST(ROUND(unit_price * qty - CASE WHEN MOD(r, 13) = 0
+                                     THEN unit_price * qty * NUMERIC "0.10"
+                                     ELSE NUMERIC "0" END, 2) AS NUMERIC) AS net_amount,
+  TIMESTAMP(DATETIME(sales_date_th, TIME(9 + MOD(r, 11), MOD(r * 7, 60), 30)), "Asia/Bangkok") AS updated_ts,
+  sales_date_th AS run_date
+FROM lines
+
+UNION ALL
+-- แถวพิเศษ 1: ขาย 00:30 เวลาไทยของ "วันนี้" → UTC ตกไปอยู่เมื่อวาน
+-- ใช้พิสูจน์ว่า DATE(sales_ts) เฉย ๆ จะรายงานยอดผิดวัน
+SELECT
+  CONCAT("R", FORMAT_DATE("%Y%m%d", CURRENT_DATE("Asia/Bangkok")), "-1001-900") AS receipt_no,
+  1 AS line_no,
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(0, 30, 0)), "Asia/Bangkok") AS sales_ts,
+  "1001" AS branch_code,
+  "8850001000001" AS sku_code,
+  "OFM" AS bu,
+  2 AS qty,
+  NUMERIC "128.25" AS unit_price,
+  NUMERIC "0" AS discount_amt,
+  NUMERIC "256.50" AS net_amount,
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(0, 35, 0)), "Asia/Bangkok") AS updated_ts,
+  CURRENT_DATE("Asia/Bangkok") AS run_date
+
+UNION ALL
+-- แถวพิเศษ 2 + 3: ใบเสร็จเดียวกัน บรรทัดเดียวกัน ส่งมา 2 เวอร์ชัน (แก้จำนวนทีหลัง)
+-- ชั้น silver ต้องเก็บเฉพาะ updated_ts ล่าสุด → เหลือ 1 แถว
+SELECT
+  CONCAT("R", FORMAT_DATE("%Y%m%d", DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY)), "-2001-901"),
+  1,
+  TIMESTAMP(DATETIME(DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY), TIME(14, 5, 0)), "Asia/Bangkok"),
+  "2001", "8850001000005", "B2S",
+  5, NUMERIC "78.30", NUMERIC "0", NUMERIC "391.50",
+  TIMESTAMP(DATETIME(DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY), TIME(14, 6, 0)), "Asia/Bangkok"),
+  DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY)
+
+UNION ALL
+SELECT
+  CONCAT("R", FORMAT_DATE("%Y%m%d", DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY)), "-2001-901"),
+  1,
+  TIMESTAMP(DATETIME(DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY), TIME(14, 5, 0)), "Asia/Bangkok"),
+  "2001", "8850001000005", "B2S",
+  3, NUMERIC "78.30", NUMERIC "0", NUMERIC "234.90",   -- เวอร์ชันแก้ไข: ลดเหลือ 3 ชิ้น
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(8, 15, 0)), "Asia/Bangkok"),
+  DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 1 DAY);
+
+
+-- ===========================================================================
+-- 4) nexpos_stock_movement — ความเคลื่อนไหวสต็อก (append อย่างเดียว)
+--    grain: doc_no x line — ใช้ทดสอบ incremental แบบ append
+-- ===========================================================================
+CREATE OR REPLACE TABLE `ofm-b2s-data-dev.sbx_bronze.nexpos_stock_movement`
+PARTITION BY run_date
+OPTIONS (description = "Dummy: ความเคลื่อนไหวสต็อกจาก NexPOS")
+AS
+WITH br AS (
+  SELECT branch_code FROM `ofm-b2s-data-dev.sbx_bronze.branch_master`
+  WHERE is_active AND branch_code <> "2003"
+),
+sku AS (
+  SELECT sku_code FROM `ofm-b2s-data-dev.sbx_bronze.sap_material_master` WHERE status = "ACTIVE"
+),
+-- ยอดยกมา 14 วันก่อน
+opening AS (
+  SELECT
+    CONCAT("OPEN-", branch_code, "-", sku_code) AS doc_no,
+    TIMESTAMP(DATETIME(DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 14 DAY), TIME(0, 5, 0)), "Asia/Bangkok") AS event_ts,
+    branch_code,
+    sku_code,
+    "OPENING" AS movement_type,
+    120 AS qty,
+    DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 14 DAY) AS run_date
+  FROM br CROSS JOIN sku
+),
+moves AS (
+  SELECT
+    CONCAT("MV-", FORMAT_DATE("%Y%m%d", d), "-", branch_code, "-", sku_code) AS doc_no,
+    TIMESTAMP(DATETIME(d, TIME(10 + MOD(r, 8), MOD(r * 3, 60), 0)), "Asia/Bangkok") AS event_ts,
+    branch_code,
+    sku_code,
+    CASE MOD(r, 4)
+      WHEN 0 THEN "RECEIVE"
+      WHEN 1 THEN "SALE"
+      WHEN 2 THEN "TRANSFER"
+      ELSE "ADJUST"
+    END AS movement_type,
+    CASE MOD(r, 4)
+      WHEN 0 THEN  10 + MOD(r, 30)      -- รับเข้า
+      WHEN 1 THEN -(1 + MOD(r, 6))      -- ขายออก
+      WHEN 2 THEN -(2 + MOD(r, 4))      -- โอนออก
+      ELSE MOD(r, 3) - 1                -- ปรับยอด -1..1
+    END AS qty,
+    d AS run_date
+  FROM (
+    SELECT
+      DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL day_offset DAY) AS d,
+      branch_code,
+      sku_code,
+      ABS(MOD(FARM_FINGERPRINT(CONCAT("mv", CAST(day_offset AS STRING), branch_code, sku_code)), 89)) AS r
+    FROM UNNEST(GENERATE_ARRAY(0, 13)) AS day_offset
+    CROSS JOIN br CROSS JOIN sku
+  )
+  WHERE MOD(r, 2) = 0
+)
+SELECT * FROM opening
+UNION ALL
+SELECT * FROM moves;
+
+
+-- ===========================================================================
+-- 5) ecom_order_header — ออเดอร์ออนไลน์ (สถานะเปลี่ยนได้ → ทดสอบ MERGE)
+--    grain: order_id x line_no  (แต่ bronze เก็บทุกเวอร์ชันที่ส่งมา)
+--    มี customer_email = PII ห้ามขึ้น gold ดิบ ๆ
+-- ===========================================================================
+CREATE OR REPLACE TABLE `ofm-b2s-data-dev.sbx_bronze.ecom_order_header`
+PARTITION BY run_date
+OPTIONS (description = "Dummy: ออเดอร์จากเว็บ/มาร์เก็ตเพลส — มี PII")
+AS
+WITH base AS (
+  SELECT
+    DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL day_offset DAY) AS order_date_th,
+    branch_code,
+    sku_code,
+    ABS(MOD(FARM_FINGERPRINT(CONCAT("eo", CAST(day_offset AS STRING), branch_code, sku_code)), 71)) AS r
+  FROM UNNEST(GENERATE_ARRAY(0, 9)) AS day_offset
+  CROSS JOIN (SELECT branch_code FROM `ofm-b2s-data-dev.sbx_bronze.branch_master`
+              WHERE is_active AND branch_code <> "2003")
+  CROSS JOIN (SELECT sku_code FROM `ofm-b2s-data-dev.sbx_bronze.sap_material_master`
+              WHERE status = "ACTIVE")
+),
+raw_orders AS (
+  SELECT
+    -- order_id ผูกกับ วันที่+สาขา+r → ไม่ชนกันข้ามสาขา
+    CONCAT("EO", FORMAT_DATE("%y%m%d", order_date_th), "-", branch_code, "-",
+           LPAD(CAST(MOD(r, 20) AS STRING), 3, "0")) AS order_id,
+    TIMESTAMP(DATETIME(order_date_th, TIME(8 + MOD(r, 12), MOD(r * 11, 60), 0)), "Asia/Bangkok") AS order_ts,
+    branch_code,
+    sku_code,
+    1 + MOD(r, 4) AS qty,
+    CAST(ROUND((50 + MOD(r, 300)) * (1 + MOD(r, 4)) * NUMERIC "1.0", 2) AS NUMERIC) AS net_amount,
+    CASE MOD(r, 5)
+      WHEN 0 THEN "pending"
+      WHEN 1 THEN "paid"
+      WHEN 2 THEN "shipped"
+      WHEN 3 THEN "delivered"
+      ELSE "cancelled"
+    END AS order_status,
+    CONCAT("cust", CAST(MOD(r, 40) AS STRING), "@example.com") AS customer_email,
+    order_date_th
+  FROM base
+  WHERE MOD(r, 3) = 1
+),
+orders AS (
+  SELECT
+    order_id,
+    -- line_no เรียงตาม SKU ภายในออเดอร์เดียวกัน → (order_id, line_no) ไม่ซ้ำแน่นอน
+    ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY sku_code) AS line_no,
+    order_ts,
+    branch_code,
+    sku_code,
+    qty,
+    net_amount,
+    order_status,
+    customer_email,
+    TIMESTAMP_ADD(order_ts, INTERVAL 30 MINUTE) AS updated_ts,
+    order_date_th AS run_date
+  FROM raw_orders
+)
+SELECT * FROM orders
+
+UNION ALL
+-- ออเดอร์เดิม 3 ใบส่งกลับมาใหม่วันนี้พร้อมสถานะที่เปลี่ยน (pending → paid)
+-- MERGE ที่ชั้น silver ต้องทับแถวเดิม ไม่ใช่เพิ่มแถวใหม่
+SELECT
+  order_id,
+  line_no,
+  order_ts,
+  branch_code,
+  sku_code,
+  qty,
+  net_amount,
+  "paid" AS order_status,
+  customer_email,
+  TIMESTAMP(DATETIME(CURRENT_DATE("Asia/Bangkok"), TIME(9, 0, 0)), "Asia/Bangkok") AS updated_ts,
+  run_date
+FROM orders
+WHERE order_status = "pending"
+QUALIFY ROW_NUMBER() OVER (ORDER BY order_ts DESC, order_id, line_no) <= 3;
+
+
+-- ===========================================================================
+-- 6) planogram_slot — แผนผังชั้นวาง (ฐานของ PHMS)
+--    grain: branch_code x sku_code x slot_id
+--    สาขา 2003 จงใจไม่มีแถว → ให้ assertion ชั้น gold จับได้
+-- ===========================================================================
+CREATE OR REPLACE TABLE `ofm-b2s-data-dev.sbx_bronze.planogram_slot`
+OPTIONS (description = "Dummy: planogram slot ต่อสาขา/สินค้า")
+AS
+SELECT
+  CONCAT("SLOT-", branch_code, "-", SUBSTR(sku_code, -3)) AS slot_id,
+  branch_code,
+  sku_code,
+  1 + MOD(ABS(FARM_FINGERPRINT(CONCAT(branch_code, sku_code))), 4) AS planned_facing,
+  DATE_SUB(CURRENT_DATE("Asia/Bangkok"), INTERVAL 30 DAY) AS effective_date,
+  TRUE AS is_active,
+  CURRENT_DATE("Asia/Bangkok") AS run_date
+FROM (SELECT branch_code FROM `ofm-b2s-data-dev.sbx_bronze.branch_master`
+      WHERE is_active AND branch_code <> "2003")
+CROSS JOIN (SELECT sku_code FROM `ofm-b2s-data-dev.sbx_bronze.sap_material_master`
+            WHERE status = "ACTIVE");

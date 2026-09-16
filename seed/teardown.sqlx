@@ -1,0 +1,15 @@
+-- ---------------------------------------------------------------------------
+-- 03_teardown.sql — ลบ sandbox ทั้งหมดทิ้ง
+-- ⚠️ ลบ dataset ทั้งชุดรวมข้อมูลข้างใน กู้คืนไม่ได้
+--    ตรวจให้แน่ใจว่าเป็น project dev และชื่อขึ้นต้น sbx_ ก่อนกด
+-- ---------------------------------------------------------------------------
+
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_bronze`              CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_silver`              CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_gold_merchandise`    CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_gold_supply_chain`   CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_gold_phms`           CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_gold_finance`        CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_gold_marketing`      CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_utility`             CASCADE;
+DROP SCHEMA IF EXISTS `ofm-b2s-data-dev.sbx_dataform_assertions` CASCADE;
