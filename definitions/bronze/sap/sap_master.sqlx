@@ -1,0 +1,23 @@
+/*
+ * CONFIG TYPE: declaration
+ * มาสเตอร์สินค้า — ต้นทางไม่เก็บประวัติ เราจึงทำ snapshot รายวันเองที่ชั้น silver
+ * (ดู silver/cleansed/slv_sap_material_master.sqlx ที่ตั้ง protected: true)
+ */
+
+config {
+  type: "declaration",
+  database: dataform.projectConfig.vars.sourceProject,
+  schema: dataform.projectConfig.vars.sourceDataset,
+  name: "sap_material_master",
+  description: "มาสเตอร์สินค้าจาก SAP — ต้นทางเก็บเฉพาะค่าปัจจุบัน ไม่มีประวัติ",
+  columns: {
+    sku_code:      "รหัสสินค้า 13 หลัก",
+    sku_name:      "ชื่อสินค้า",
+    dept_code:     "รหัสแผนกสินค้า",
+    supplier_code: "รหัสผู้ขาย",
+    std_cost:      "ต้นทุนมาตรฐาน (THB, NUMERIC) — เปลี่ยนได้ทุกเมื่อ",
+    status:        "ACTIVE / INACTIVE",
+    updated_ts:    "เวลาที่แก้ไขล่าสุด (UTC)",
+    run_date:      "วันที่โหลดเข้า bronze"
+  }
+}

@@ -1,0 +1,32 @@
+/*
+ * CONFIG TYPE: declaration          (คู่มือบทที่ 9)
+ *
+ * ประกาศตารางที่ "มีอยู่แล้ว" ใน BigQuery ให้ Dataform รู้จัก — Dataform ไม่สร้าง ไม่แตะ
+ * ในชีวิตจริง Airflow เป็นคนโหลดตารางนี้ ใน sandbox เรา seed ด้วย seed/01_seed_bronze.sql
+ *
+ * ทำไมต้องประกาศ: ได้ dependency graph ที่ครบ + เปลี่ยน source ทีเดียวจบ
+ * จุดสำคัญ: ใช้ vars แทนการ hardcode → dev/prod ชี้คนละ dataset ด้วยโค้ดชุดเดียว
+ * ไฟล์ declaration ห้ามมี body (ไม่มี SELECT)
+ */
+
+config {
+  type: "declaration",
+  database: dataform.projectConfig.vars.sourceProject,
+  schema: dataform.projectConfig.vars.sourceDataset,
+  name: "nexpos_sales_txn",
+  description: "ธุรกรรมการขายจาก NexPOS ระดับใบเสร็จ x บรรทัด (sales_ts เป็น UTC)",
+  columns: {
+    receipt_no:   "เลขที่ใบเสร็จ",
+    line_no:      "ลำดับบรรทัดในใบเสร็จ",
+    sales_ts:     "เวลาที่ขาย เป็น TIMESTAMP UTC — ห้ามสมมติว่าเป็นเวลาไทย",
+    branch_code:  "รหัสสาขา",
+    sku_code:     "รหัสสินค้า",
+    bu:           "หน่วยธุรกิจ OFM / B2S",
+    qty:          "จำนวนที่ขาย",
+    unit_price:   "ราคาต่อหน่วย (THB, NUMERIC)",
+    discount_amt: "ส่วนลด (THB, NUMERIC)",
+    net_amount:   "มูลค่าสุทธิ (THB, NUMERIC)",
+    updated_ts:   "เวลาที่ต้นทางแก้ไขแถวนี้ล่าสุด (UTC)",
+    run_date:     "วันที่โหลดเข้า bronze — partition key"
+  }
+}
