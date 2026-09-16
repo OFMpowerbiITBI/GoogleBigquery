@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# workflow_settings.yaml — Dataform sandbox ของทีม Smart Data (OFM/B2S)
+#
+# repo นี้เป็น "สนามซ้อม": dummy data + ตัวอย่าง config ทุกชนิดที่คู่มือพูดถึง
+# ทุกอย่างเขียนลง dataset ที่ขึ้นต้นด้วย sbx_ เพื่อไม่ให้ชนของจริง
+#
+# กติกาจากคู่มือที่ไฟล์นี้บังคับใช้:
+#   - ตั้ง defaultLocation เสมอ (ไม่งั้นตกไป US multi-region)
+#   - pin dataformCoreVersion เสมอ
+#   - source project/dataset อยู่ใน vars เพื่อให้ dev/prod ชี้คนละที่ด้วยโค้ดชุดเดียว
+# ---------------------------------------------------------------------------
+
+defaultProject: ofm-b2s-data-dev
+defaultDataset: sbx_gold
+defaultLocation: asia-southeast1
+defaultAssertionDataset: sbx_dataform_assertions
+dataformCoreVersion: "3.0.43"
+
+vars:
+  # ชั้น bronze ที่ Airflow เป็นคนโหลด (ใน sandbox เราจะ seed เอง)
+  sourceProject: ofm-b2s-data-dev
+  sourceDataset: sbx_bronze
+
+  # ใช้แยกพฤติกรรม dev/prod ในโค้ด — override ได้จาก release config
+  environment: sandbox
+
+  # ค่าคงที่ที่ใช้ทั้ง repo (vars ต้องเป็น string เสมอ)
+  dataStartDate: "2026-01-01"
+  lateArrivalDays: "7"

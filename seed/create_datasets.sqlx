@@ -1,0 +1,40 @@
+-- ---------------------------------------------------------------------------
+-- 00_create_datasets.sql — สร้าง dataset ทั้งหมดของ sandbox
+--
+-- รันที่: BigQuery console (project ofm-b2s-data-dev) หรือ
+--         bq query --use_legacy_sql=false < seed/00_create_datasets.sql
+--
+-- ถ้าใช้ project อื่น ให้ find & replace `ofm-b2s-data-dev` ทั้งไฟล์
+-- ทุก dataset ขึ้นต้นด้วย sbx_ เพื่อกันชนกับของจริง และอยู่ asia-southeast1 เสมอ
+-- ---------------------------------------------------------------------------
+
+-- ชั้น bronze: ของดิบ — ในชีวิตจริง Airflow เป็นคนโหลด ใน sandbox เรา seed เอง
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_bronze`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox bronze — dummy source tables");
+
+-- ชั้น silver: cleansed / conformed / dimensions (Dataform สร้าง)
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_silver`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox silver — cleansed + conformed + dim");
+
+-- ชั้น gold แยกตามโดเมนธุรกิจ
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_gold_merchandise`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox gold — merchandise");
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_gold_supply_chain`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox gold — supply chain");
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_gold_phms`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox gold — PHMS");
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_gold_finance`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox gold — finance");
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_gold_marketing`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox gold — marketing");
+
+-- งานดูแลระบบ (operations) ไม่ใช่ชั้นข้อมูล
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_utility`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox utility — operations output");
+
+-- ที่เก็บ view ผลการทดสอบของ assertion (ตรงกับ defaultAssertionDataset)
+CREATE SCHEMA IF NOT EXISTS `ofm-b2s-data-dev.sbx_dataform_assertions`
+  OPTIONS (location = "asia-southeast1", description = "Sandbox assertion results");
+
+
+  select 1
